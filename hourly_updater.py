@@ -117,6 +117,10 @@ def fetch_api_df(url, key="hourly"):
 aqi_df = fetch_api_df(aqi_url)
 weather_df = fetch_api_df(forecast_url)
 
+print("Available AQI timestamps:", aqi_df["time"].dt.strftime('%Y-%m-%d %H:%M:%S').tolist())
+print("Available Weather timestamps:", weather_df["time"].dt.strftime('%Y-%m-%d %H:%M:%S').tolist())
+print("🕓 Looking for:", next_hour_utc)
+
 # --- Merge both dataframes on time ---
 merged = pd.merge(aqi_df, weather_df, on="time", how="inner")
 
