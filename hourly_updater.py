@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import os
 API_KEY = os.environ["HOPSWORKS_API_KEY"]
 # --- Config ---
-PROJECT_NAME = "weather_aqi"
+PROJECT_NAME = "10_Pearls_AQI_data"
 FG_NAME = "aqi_weather_features"
 FG_VERSION = 1
 
