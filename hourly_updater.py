@@ -122,14 +122,15 @@ print("Available Weather timestamps:", weather_df["time"].dt.strftime('%Y-%m-%d 
 print("🕓 Looking for:", next_hour_utc)
 
 # --- Merge both dataframes on time ---
+# Merge on time
 merged = pd.merge(aqi_df, weather_df, on="time", how="inner")
 
-# Normalize times for accurate comparison
-merged["time"] = merged["time"].dt.floor("H")
-next_hour_utc = next_hour_utc.replace(minute=0, second=0, microsecond=0)
+# Convert to UTC explicitly for safe comparison
+merged["time"] = pd.to_datetime(merged["time"], utc=True)
 
-# Filter only the next hour row
+# Filter for only the next hour
 merged = merged[merged["time"] == next_hour_utc]
+
 
 # --- Insert to Feature Store ---
 if not merged.empty:
