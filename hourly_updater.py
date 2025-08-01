@@ -91,7 +91,7 @@ latest_time = fg_df["time"].max()
 
 # --- Compute next hour in UTC ---
 next_hour_utc = (latest_time + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-next_hour_date = next_hour_utc.date().strftime("%Y-%m-%d")  # Only pass date to the API
+next_hour_date = next_hour_utc.date().strftime("%Y-%m-%d")
 
 # --- AQI API URL ---
 aqi_url = (
@@ -107,30 +107,26 @@ forecast_url = (
     f"wind_speed_10m,wind_direction_10m&timezone=auto"
 )
 
-def fetch_api_df(url, key="hourly"):
+def fetch_api_df(url, key="hourly", is_local=False):
     response = requests.get(url).json()
     df = pd.DataFrame(response[key])
-    df["time"] = pd.to_datetime(df["time"], utc=True)  # Normalize to UTC
+    if is_local:
+        df["time"] = pd.to_datetime(df["time"]).dt.tz_localize("Asia/Karachi").dt.tz_convert("UTC")
+    else:
+        df["time"] = pd.to_datetime(df["time"], utc=True)
     return df
 
 # --- Fetch API Data ---
-aqi_df = fetch_api_df(aqi_url)
-weather_df = fetch_api_df(forecast_url)
+aqi_df = fetch_api_df(aqi_url)                     # already in UTC
+weather_df = fetch_api_df(forecast_url, is_local=True)  # local → convert to UTC
 
 print("Available AQI timestamps:", aqi_df["time"].dt.strftime('%Y-%m-%d %H:%M:%S').tolist())
 print("Available Weather timestamps:", weather_df["time"].dt.strftime('%Y-%m-%d %H:%M:%S').tolist())
 print("🕓 Looking for:", next_hour_utc)
 
-# --- Merge both dataframes on time ---
-# Merge on time
+# --- Merge and Filter ---
 merged = pd.merge(aqi_df, weather_df, on="time", how="inner")
-
-# Convert to UTC explicitly for safe comparison
-merged["time"] = pd.to_datetime(merged["time"], utc=True)
-
-# Filter for only the next hour
 merged = merged[merged["time"] == next_hour_utc]
-
 
 # --- Insert to Feature Store ---
 if not merged.empty:
@@ -138,3 +134,4 @@ if not merged.empty:
     print(f"✅ Inserted new row for time: {next_hour_utc}")
 else:
     print(f"⚠️ No data found for time {next_hour_utc}. Nothing inserted.")
+
