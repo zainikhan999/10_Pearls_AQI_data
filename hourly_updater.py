@@ -128,6 +128,22 @@ print("🕓 Looking for:", next_hour_utc)
 merged = pd.merge(aqi_df, weather_df, on="time", how="inner")
 merged = merged[merged["time"] == next_hour_utc]
 
+# --- Convert types to match schema ---
+float_columns = [
+    "carbon_dioxide", "us_aqi",
+    "relative_humidity_2m", "wind_direction_10m"
+]
+for col in float_columns:
+    if col in merged.columns:
+        merged[col] = merged[col].astype(float)
+
+# --- Insert to Feature Store ---
+if not merged.empty:
+    fg.insert(merged, write_options={"wait_for_job": False})
+    print(f"✅ Inserted new row for time: {next_hour_utc}")
+else:
+    print(f"⚠️ No data found for time {next_hour_utc}. Nothing inserted.")
+
 # --- Insert to Feature Store ---
 if not merged.empty:
     fg.insert(merged, write_options={"wait_for_job": False})
