@@ -6,7 +6,6 @@ from zoneinfo import ZoneInfo
 import os
 API_KEY = os.environ["HOPSWORKS_API_KEY"]
 # --- Config ---
-PROJECT_NAME = "10_Pearls_AQI_data"
 FG_NAME = "aqi_weather_features"
 FG_VERSION = 1
 
@@ -14,7 +13,7 @@ LAT, LON = 33.5973, 73.0479
 TIMEZONE = "Asia/Karachi"
 
 # --- Login to Hopsworks ---
-project = hopsworks.login(api_key_value=API_KEY, project=PROJECT_NAME)
+project = hopsworks.login(api_key_value=API_KEY, project="weather_aqi")
 fs = project.get_feature_store()
 fg = fs.get_feature_group(name=FG_NAME, version=FG_VERSION)
 
