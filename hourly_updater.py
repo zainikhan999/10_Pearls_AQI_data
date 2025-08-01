@@ -4,7 +4,7 @@ import requests
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import os
-API_KEY = os.environ["HOPSWORKS_API_KEY"]
+API_KEY = os.environ["AQI_API"]
 # --- Config ---
 FG_NAME = "aqi_weather_features"
 FG_VERSION = 1

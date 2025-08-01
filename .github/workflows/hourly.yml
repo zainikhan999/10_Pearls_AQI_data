@@ -24,6 +24,6 @@ jobs:
 
       - name: Run AQI Updater
         env:
-          HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
+          HOPSWORKS_API_KEY: ${{ secrets.AQI_API}}
         run: |
           python hourly_updater.py
