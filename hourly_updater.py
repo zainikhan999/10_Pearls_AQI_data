@@ -1,9 +1,9 @@
+import os
 import hopsworks
 import pandas as pd
 import requests
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-import os
 API_KEY = os.environ["AQI_API"]
 # --- Config ---
 FG_NAME = "aqi_weather_features"
