@@ -104,7 +104,7 @@ aqi_url = (
 forecast_url = (
     f"https://api.open-meteo.com/v1/forecast?"
     f"latitude={LAT}&longitude={LON}&hourly=temperature_2m,relative_humidity_2m,rain,"
-    f"wind_speed_10m,wind_direction_10m&timezone=auto"
+    f"wind_speed_10m,wind_direction_10m&timezone=auto&past_days=1"
 )
 
 def fetch_api_df(url, key="hourly", is_local=False):
