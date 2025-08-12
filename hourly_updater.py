@@ -109,7 +109,7 @@ def fetch_aqi_data(start_date, end_date):
     if 'hourly' not in response:
         print("⚠️ Warning: 'hourly' key missing in API response!")
         print("API response:", response)
-        return pd.DataFrame()  # return empty df to avoid errors
+        return pd.DataFrame()  # empty df to avoid errors
     df = pd.DataFrame(response['hourly'])
     df["time"] = pd.to_datetime(df["time"]).dt.tz_localize(TIMEZONE)
     print(f"📅 API returned {len(df)} rows with times from {df['time'].min()} to {df['time'].max()}")
@@ -126,26 +126,39 @@ def main():
 
     if fg_df.empty:
         print("ℹ️ Feature group empty, fetching yesterday's data as start")
-        start_date = (datetime.now() - timedelta(days=1)).date().strftime("%Y-%m-%d")
+        # Start from yesterday date (string)
+        start_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        latest_time = None
     else:
         latest_time = fg_df["time"].max()
         print(f"ℹ️ Latest timestamp in feature store: {latest_time}")
-        start_date = (latest_time + timedelta(hours=1)).date().strftime("%Y-%m-%d")
 
-    end_date = datetime.now().date().strftime("%Y-%m-%d")
+        # Keep full datetime, no truncation to date
+        start_dt = latest_time + timedelta(hours=1)
+
+        # API accepts only date strings for start/end, so extract date part
+        start_date = start_dt.strftime("%Y-%m-%d")
+
+    # End date is today’s date string
+    end_date = datetime.now(tz=latest_time.tzinfo if latest_time is not None else None).strftime("%Y-%m-%d")
+
     print(f"ℹ️ Using start_date = {start_date}, end_date = {end_date}")
 
-    # Check for invalid date range
+    # Validate date range
     if start_date > end_date:
         print(f"⚠️ Start date {start_date} is after end date {end_date}. No new data to fetch.")
-        return  # Stop here, no data to fetch
+        return
 
-    # Fetch new data from API
+    # Fetch data from API
     new_data = fetch_aqi_data(start_date, end_date)
 
-    # Filter out any already existing timestamps
-    existing_times = set(fg_df["time"])
-    new_data = new_data[~new_data["time"].isin(existing_times)]
+    if new_data.empty:
+        print("⚠️ No data returned from API")
+        return
+
+    # Filter out already existing timestamps using exact datetime comparison
+    if latest_time is not None:
+        new_data = new_data[new_data["time"] > latest_time]
 
     if not new_data.empty:
         # Convert time to UTC before inserting
@@ -153,7 +166,7 @@ def main():
         fg.insert(new_data, write_options={"wait_for_job": False})
         print(f"✅ Inserted {len(new_data)} new rows from {start_date} to {end_date}")
     else:
-        print("⚠️ No new data to insert")
+        print("⚠️ No new data to insert after filtering existing timestamps")
 
 if __name__ == "__main__":
     main()
