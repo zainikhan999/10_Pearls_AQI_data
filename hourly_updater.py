@@ -111,7 +111,23 @@ def fetch_aqi_data(start_date, end_date):
         print("API response:", response)
         return pd.DataFrame()  # empty df to avoid errors
     df = pd.DataFrame(response['hourly'])
+
+    # Rename columns to match feature store schema
+    df = df.rename(columns={
+        "pm10": "pm_10",
+        "pm2_5": "pm_25",
+        "carbon_monoxide": "carbon_monoxidegm",
+    })
+
+    # Fix data types to match schema
+    df['carbon_monoxidegm'] = df['carbon_monoxidegm'].astype('Int64')  # nullable int
+    df['ozone'] = df['ozone'].astype('Int64')  # nullable int
+    df['carbon_dioxide'] = df['carbon_dioxide'].astype(float)
+    df['pm_10'] = df['pm_10'].astype(float)
+    df['pm_25'] = df['pm_25'].astype(float)
+
     df["time"] = pd.to_datetime(df["time"]).dt.tz_localize(TIMEZONE)
+
     print(f"📅 API returned {len(df)} rows with times from {df['time'].min()} to {df['time'].max()}")
     return df
 
@@ -170,4 +186,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
