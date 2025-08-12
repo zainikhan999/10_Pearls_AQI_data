@@ -143,27 +143,23 @@ def main():
     if fg_df.empty:
         print("ℹ️ Feature group empty, fetching yesterday's data as start")
         # Start from yesterday date (string)
-        start_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        latest_time = None
+        start_dt = datetime.now(tz=pd.Timestamp.now().tz).replace(minute=0, second=0, microsecond=0) - timedelta(days=1)
     else:
         latest_time = fg_df["time"].max()
         print(f"ℹ️ Latest timestamp in feature store: {latest_time}")
-
-        # Keep full datetime, no truncation to date
         start_dt = latest_time + timedelta(hours=1)
 
-        # API accepts only date strings for start/end, so extract date part
-        start_date = start_dt.strftime("%Y-%m-%d")
+    # Calculate end datetime as current time truncated to hour
+    now = datetime.now(tz=pd.Timestamp.now().tz).replace(minute=0, second=0, microsecond=0)
+    
+    if start_dt > now:
+        print(f"⚠️ Start datetime {start_dt} is after current hour {now}. No new data to fetch.")
+        return
 
-    # End date is today’s date string
-    end_date = datetime.now(tz=latest_time.tzinfo if latest_time is not None else None).strftime("%Y-%m-%d")
+    start_date = start_dt.date().strftime("%Y-%m-%d")
+    end_date = now.date().strftime("%Y-%m-%d")
 
     print(f"ℹ️ Using start_date = {start_date}, end_date = {end_date}")
-
-    # Validate date range
-    if start_date > end_date:
-        print(f"⚠️ Start date {start_date} is after end date {end_date}. No new data to fetch.")
-        return
 
     # Fetch data from API
     new_data = fetch_aqi_data(start_date, end_date)
@@ -172,17 +168,20 @@ def main():
         print("⚠️ No data returned from API")
         return
 
-    # Filter out already existing timestamps using exact datetime comparison
-    if latest_time is not None:
-        new_data = new_data[new_data["time"] > latest_time]
+    # Filter out times <= latest_time (exact datetime comparison)
+    if not fg_df.empty:
+        new_data = new_data[new_data["time"] >= start_dt]
+
+    # Only keep data up to current hour (inclusive)
+    new_data = new_data[new_data["time"] <= now]
 
     if not new_data.empty:
         # Convert time to UTC before inserting
         new_data["time"] = new_data["time"].dt.tz_convert("UTC")
         fg.insert(new_data, write_options={"wait_for_job": False})
-        print(f"✅ Inserted {len(new_data)} new rows from {start_date} to {end_date}")
+        print(f"✅ Inserted {len(new_data)} new rows from {start_date} to {end_date} (up to {now})")
     else:
-        print("⚠️ No new data to insert after filtering existing timestamps")
+        print("⚠️ No new data to insert after filtering existing timestamps and future hours")
 
 if __name__ == "__main__":
     main()
