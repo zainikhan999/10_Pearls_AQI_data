@@ -99,14 +99,20 @@ LAT, LON = 33.5973, 73.0479
 TIMEZONE = "Asia/Karachi"
 
 def fetch_aqi_data(start_date, end_date):
+    print(f"🔍 Fetching AQI data from API for dates: {start_date} to {end_date}")
     url = (
         f"https://air-quality-api.open-meteo.com/v1/air-quality?"
         f"latitude={LAT}&longitude={LON}&hourly=pm10,pm2_5,carbon_monoxide,carbon_dioxide,"
         f"nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi&start_date={start_date}&end_date={end_date}&timezone={TIMEZONE}"
     )
     response = requests.get(url).json()
+    if 'hourly' not in response:
+        print("⚠️ Warning: 'hourly' key missing in API response!")
+        print("API response:", response)
+        return pd.DataFrame()  # return empty df to avoid errors
     df = pd.DataFrame(response['hourly'])
     df["time"] = pd.to_datetime(df["time"]).dt.tz_localize(TIMEZONE)
+    print(f"📅 API returned {len(df)} rows with times from {df['time'].min()} to {df['time'].max()}")
     return df
 
 def main():
@@ -119,13 +125,15 @@ def main():
     fg_df["time"] = pd.to_datetime(fg_df["time"], utc=True).dt.tz_convert(TIMEZONE)
 
     if fg_df.empty:
-        print("Feature group empty, fetching today's data from API start")
+        print("ℹ️ Feature group empty, fetching yesterday's data as start")
         start_date = (datetime.now() - timedelta(days=1)).date().strftime("%Y-%m-%d")
     else:
         latest_time = fg_df["time"].max()
+        print(f"ℹ️ Latest timestamp in feature store: {latest_time}")
         start_date = (latest_time + timedelta(hours=1)).date().strftime("%Y-%m-%d")
 
     end_date = datetime.now().date().strftime("%Y-%m-%d")
+    print(f"ℹ️ Using start_date = {start_date}, end_date = {end_date}")
 
     # Fetch new data from API
     new_data = fetch_aqi_data(start_date, end_date)
