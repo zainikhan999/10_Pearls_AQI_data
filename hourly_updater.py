@@ -89,77 +89,58 @@ import os
 import hopsworks
 import pandas as pd
 import requests
-from datetime import timedelta
+from datetime import datetime, timedelta
 
-# --- Config ---
 API_KEY = os.environ["HOPSWORKS_API_KEY"]
 FG_NAME = "aqi_weather_features"
-FG_VERSION = 1
+FG_VERSION = 2  # Use version 2
 
 LAT, LON = 33.5973, 73.0479
 TIMEZONE = "Asia/Karachi"
 
-# --- Login to Hopsworks ---
-project = hopsworks.login(api_key_value=API_KEY, project="weather_aqi")
-fs = project.get_feature_store()
-fg = fs.get_feature_group(name=FG_NAME, version=FG_VERSION)
-
-# --- Get latest timestamp in PKT ---
-fg_df = fg.read()
-fg_df["time"] = pd.to_datetime(fg_df["time"], utc=True).dt.tz_convert(TIMEZONE)
-latest_time_pkt = fg_df["time"].max()
-
-# --- Compute next hour in PKT ---
-next_hour_pkt = (latest_time_pkt + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-next_hour_date = next_hour_pkt.date().strftime("%Y-%m-%d")
-
-# --- AQI API URL (returns PKT if timezone=TIMEZONE) ---
-aqi_url = (
-    f"https://air-quality-api.open-meteo.com/v1/air-quality?"
-    f"latitude={LAT}&longitude={LON}&hourly=pm10,pm2_5,carbon_monoxide,carbon_dioxide,"
-    f"nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi&start_date={next_hour_date}&end_date={next_hour_date}"
-    f"&timezone={TIMEZONE}"
-)
-
-# --- Weather API URL ---
-forecast_url = (
-    f"https://api.open-meteo.com/v1/forecast?"
-    f"latitude={LAT}&longitude={LON}&hourly=temperature_2m,relative_humidity_2m,rain,"
-    f"wind_speed_10m,wind_direction_10m&timezone={TIMEZONE}&past_days=1"
-)
-
-def fetch_api_df(url, key="hourly"):
+def fetch_aqi_data(start_date, end_date):
+    url = (
+        f"https://air-quality-api.open-meteo.com/v1/air-quality?"
+        f"latitude={LAT}&longitude={LON}&hourly=pm10,pm2_5,carbon_monoxide,carbon_dioxide,"
+        f"nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi&start_date={start_date}&end_date={end_date}&timezone={TIMEZONE}"
+    )
     response = requests.get(url).json()
-    df = pd.DataFrame(response[key])
+    df = pd.DataFrame(response['hourly'])
     df["time"] = pd.to_datetime(df["time"]).dt.tz_localize(TIMEZONE)
     return df
 
-# --- Fetch API Data in PKT ---
-aqi_df = fetch_api_df(aqi_url)
-weather_df = fetch_api_df(forecast_url)
+def main():
+    project = hopsworks.login(api_key_value=API_KEY, project="weather_aqi")
+    fs = project.get_feature_store()
+    fg = fs.get_feature_group(name=FG_NAME, version=FG_VERSION)
 
-print("Available AQI timestamps:", aqi_df["time"].dt.strftime('%Y-%m-%d %H:%M:%S').tolist())
-print("Available Weather timestamps:", weather_df["time"].dt.strftime('%Y-%m-%d %H:%M:%S').tolist())
-print("🕓 Looking for:", next_hour_pkt)
+    # Read existing data timestamps in PKT timezone
+    fg_df = fg.read()
+    fg_df["time"] = pd.to_datetime(fg_df["time"], utc=True).dt.tz_convert(TIMEZONE)
 
-# --- Merge and Filter ---
-merged = pd.merge(aqi_df, weather_df, on="time", how="inner")
-merged = merged[merged["time"] == next_hour_pkt]
+    if fg_df.empty:
+        print("Feature group empty, fetching today's data from API start")
+        start_date = (datetime.now() - timedelta(days=1)).date().strftime("%Y-%m-%d")
+    else:
+        latest_time = fg_df["time"].max()
+        start_date = (latest_time + timedelta(hours=1)).date().strftime("%Y-%m-%d")
 
-# --- Convert types to match schema ---
-float_columns = [
-    "carbon_dioxide", "us_aqi",
-    "relative_humidity_2m", "wind_direction_10m"
-]
-for col in float_columns:
-    if col in merged.columns:
-        merged[col] = merged[col].astype(float)
+    end_date = datetime.now().date().strftime("%Y-%m-%d")
 
-# --- Insert to Feature Store ---
-if not merged.empty:
-    # Convert to UTC before inserting into feature store
-    merged["time"] = merged["time"].dt.tz_convert("UTC")
-    fg.insert(merged, write_options={"wait_for_job": False})
-    print(f"✅ Inserted new row for PKT time: {next_hour_pkt}")
-else:
-    print(f"⚠️ No data found for PKT time {next_hour_pkt}. Nothing inserted.")
+    # Fetch new data from API
+    new_data = fetch_aqi_data(start_date, end_date)
+
+    # Filter out any already existing timestamps
+    existing_times = set(fg_df["time"])
+    new_data = new_data[~new_data["time"].isin(existing_times)]
+
+    if not new_data.empty:
+        # Convert time to UTC before inserting
+        new_data["time"] = new_data["time"].dt.tz_convert("UTC")
+        fg.insert(new_data, write_options={"wait_for_job": False})
+        print(f"✅ Inserted {len(new_data)} new rows from {start_date} to {end_date}")
+    else:
+        print("⚠️ No new data to insert")
+
+if __name__ == "__main__":
+    main()
