@@ -90,6 +90,7 @@ import hopsworks
 import pandas as pd
 import requests
 from datetime import datetime, timedelta
+from pytz import timezone
 
 API_KEY = os.environ["HOPSWORKS_API_KEY"]
 FG_NAME = "aqi_weather_features"
@@ -150,7 +151,12 @@ def main():
         start_dt = latest_time + timedelta(hours=1)
 
     # Calculate end datetime as current time truncated to hour
-    now = datetime.now(tz=pd.Timestamp.now().tz).replace(minute=0, second=0, microsecond=0)
+
+    tz = timezone("Asia/Karachi")
+
+    now = datetime.now(tz).replace(minute=0, second=0, microsecond=0)
+
+
     
     if start_dt > now:
         print(f"⚠️ Start datetime {start_dt} is after current hour {now}. No new data to fetch.")
