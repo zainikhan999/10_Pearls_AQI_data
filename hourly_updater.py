@@ -135,6 +135,11 @@ def main():
     end_date = datetime.now().date().strftime("%Y-%m-%d")
     print(f"ℹ️ Using start_date = {start_date}, end_date = {end_date}")
 
+    # Check for invalid date range
+    if start_date > end_date:
+        print(f"⚠️ Start date {start_date} is after end date {end_date}. No new data to fetch.")
+        return  # Stop here, no data to fetch
+
     # Fetch new data from API
     new_data = fetch_aqi_data(start_date, end_date)
 
@@ -152,3 +157,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
