@@ -25,7 +25,7 @@ jobs:
 
       - name: Run inference and push to Hopsworks
         env:
-          HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
+          HOPSWORKS_API_KEY: ${{ secrets.API }}
           GIT_COMMIT: ${{ github.sha }}
         run: |
           python training.py \
