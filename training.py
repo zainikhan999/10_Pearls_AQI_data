@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import requests
 from tensorflow.keras.models import load_model
+API_KEY = os.environ["HOPSWORKS_API_KEY"]
 
 # ---- Config (tweak if needed) ----
 PROJECT_NAME = "weather_aqi"
@@ -132,8 +133,6 @@ def push_df_to_fg(fs, name, version, df_to_insert):
     print(f"Inserted {len(df_to_insert)} rows to FG {name} v{version}")
 
 def main(args):
-    API_KEY = os.environ["HOPSWORKS_API_KEY"]
-
     if not API_KEY:
         raise EnvironmentError("HOPSWORKS_API_KEY not set in env")
 
