@@ -1,0 +1,41 @@
+name: Run LSTM AQI Forecast Pipeline
+
+on:
+  workflow_dispatch: # manual trigger
+  schedule:
+    - cron: "0 0 * * *" # daily at 00:00 UTC
+
+jobs:
+  run-inference:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install tensorflow pandas numpy joblib requests hopsworks
+
+      - name: Run inference and push to Hopsworks
+        env:
+          HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
+          GIT_COMMIT: ${{ github.sha }}
+        run: |
+          python training.py \
+            --out forecasts.csv \
+            --model-version latest \
+            --lat 33.5973 \
+            --lon 73.0479
+
+      - name: Upload forecast CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: forecasts
+          path: forecasts.csv
