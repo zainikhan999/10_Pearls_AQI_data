@@ -1,9 +1,11 @@
 import streamlit as st
 import pandas as pd
 import hopsworks
+import os
+API_KEY = os.environ["HOPSWORKS_API_KEY"]
 
 # === Connect to Hopsworks ===
-project = hopsworks.login()
+project = hopsworks.login(api_key_value=API_KEY, project="weather_aqi")
 fs = project.get_feature_store()
 
 # Load the predictions feature group
