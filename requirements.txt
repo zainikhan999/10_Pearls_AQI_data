@@ -5,6 +5,6 @@ joblib
 scikit-learn
 requests
 streamlit
-hopsworks[python]
+hopsworks[python]==4.2.*
 hsml
 matplotlib

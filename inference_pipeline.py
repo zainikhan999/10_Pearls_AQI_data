@@ -178,7 +178,6 @@ class AQIInferencePipeline:
                 description="Daily AQI forecasts with model version and prediction timestamp",
                 primary_key=["datetime_utc", "prediction_date"],
                 event_time="datetime_utc",
-                online=True
             )
             predictions_fg.insert(forecast_df)
 
