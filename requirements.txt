@@ -3,7 +3,8 @@ pandas
 lightgbm
 joblib
 scikit-learn
-hopsworks
-hsml
 requests
 streamlit
+hopsworks[python]
+hsml
+matplotlib
