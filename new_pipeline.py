@@ -203,7 +203,7 @@ class FixedAQIPipeline:
         X_test = test_data[all_features]
         y_test = test_data["us_aqi"]
         
-        # Train model
+        # Train model - FIX: Create validation dataset for early stopping
         params = {
             'objective': 'regression',
             'metric': 'rmse',
@@ -217,10 +217,16 @@ class FixedAQIPipeline:
             'seed': 42
         }
         
+        # Create both training and validation datasets
         lgb_train = lgb.Dataset(X_train, y_train)
+        lgb_val = lgb.Dataset(X_test, y_test, reference=lgb_train)
+        
+        # Train with validation dataset for early stopping
         model = lgb.train(
             params,
             lgb_train,
+            valid_sets=[lgb_train, lgb_val],
+            valid_names=['train', 'val'],
             num_boost_round=1000,
             callbacks=[lgb.early_stopping(stopping_rounds=50), lgb.log_evaluation(0)]
         )
