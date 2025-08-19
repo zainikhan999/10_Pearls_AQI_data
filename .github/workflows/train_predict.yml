@@ -2,7 +2,7 @@ name: AQI Pipeline - Daily Retraining & Forecast
 
 on:
   schedule:
-    - cron: "0 09 * * *" # Runs every day at 2PM UTC (adjust if you need 2PM Pakistan Time)
+    - cron: "0 09 * * *" # Runs every day at 2PM Pakistan Time
   workflow_dispatch: # Allow manual trigger from GitHub UI
 
 jobs:
@@ -20,9 +20,11 @@ jobs:
 
       - name: Install dependencies
         run: |
+          pip install --upgrade pip
           pip install -r requirements.txt
+
       - name: Run AQI Pipeline
         env:
-          HOPSWORKS_API_KEY: ${{ secrets.API }}
+          HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
         run: |
           python new_pipeline.py
