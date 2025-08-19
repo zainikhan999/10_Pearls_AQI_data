@@ -1,48 +1,48 @@
-name: Train and Inference AQI
+# name: Train and Inference AQI
 
-on:
-  schedule:
-    - cron: "0 0 * * *" # run once per day at 00:00 UTC
-  workflow_dispatch: # allow manual trigger
+# on:
+#   schedule:
+#     - cron: "0 0 * * *" # run once per day at 00:00 UTC
+#   workflow_dispatch: # allow manual trigger
 
-jobs:
-  train:
-    runs-on: ubuntu-latest
+# jobs:
+#   train:
+#     runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+#     steps:
+#       - name: Checkout code
+#         uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
+#       - name: Set up Python
+#         uses: actions/setup-python@v4
+#         with:
+#           python-version: "3.11"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+#       - name: Install dependencies
+#         run: pip install -r requirements.txt
 
-      - name: Run training pipeline
-        env:
-          HOPSWORKS_API_KEY: ${{ secrets.API }}
-        run: python training_pipeline.py
+#       - name: Run training pipeline
+#         env:
+#           HOPSWORKS_API_KEY: ${{ secrets.API }}
+#         run: python training_pipeline.py
 
-  inference:
-    runs-on: ubuntu-latest
-    needs: train # 👈 ensures this runs only after training finishes successfully
+#   inference:
+#     runs-on: ubuntu-latest
+#     needs: train # 👈 ensures this runs only after training finishes successfully
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+#     steps:
+#       - name: Checkout code
+#         uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.10"
+#       - name: Set up Python
+#         uses: actions/setup-python@v4
+#         with:
+#           python-version: "3.10"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+#       - name: Install dependencies
+#         run: pip install -r requirements.txt
 
-      - name: Run inference pipeline
-        env:
-          HOPSWORKS_API_KEY: ${{ secrets.API }}
-        run: python inference_pipeline.py
+#       - name: Run inference pipeline
+#         env:
+#           HOPSWORKS_API_KEY: ${{ secrets.API }}
+#         run: python inference_pipeline.py

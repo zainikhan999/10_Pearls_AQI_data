@@ -1,29 +1,29 @@
-name: AQI FeatureStore Updater
+# name: AQI FeatureStore Updater
 
-on:
-  schedule:
-    - cron: "0 * * * *" # Runs every hour
-  workflow_dispatch: # Allows manual trigger
+# on:
+#   schedule:
+#     - cron: "0 * * * *" # Runs every hour
+#   workflow_dispatch: # Allows manual trigger
 
-jobs:
-  update-featurestore:
-    runs-on: ubuntu-latest
+# jobs:
+#   update-featurestore:
+#     runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+#     steps:
+#       - name: Checkout code
+#         uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: 3.11
+#       - name: Set up Python
+#         uses: actions/setup-python@v4
+#         with:
+#           python-version: 3.11
 
-      - name: Install dependencies
-        run: |
-          pip install hopsworks[python] confluent-kafka requests
+#       - name: Install dependencies
+#         run: |
+#           pip install hopsworks[python] confluent-kafka requests
 
-      - name: Run AQI Updater
-        env:
-          HOPSWORKS_API_KEY: ${{ secrets.API }}
-        run: |
-          python hourly_updater.py
+#       - name: Run AQI Updater
+#         env:
+#           HOPSWORKS_API_KEY: ${{ secrets.API }}
+#         run: |
+#           python hourly_updater.py

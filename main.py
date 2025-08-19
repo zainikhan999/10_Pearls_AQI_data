@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import hopsworks
 import os
+
 API_KEY = os.environ["HOPSWORKS_API_KEY"]
 
 # === Connect to Hopsworks ===
@@ -14,9 +15,24 @@ fg = fs.get_feature_group(name="aqi_predictions", version=1)
 # Read as dataframe
 df = fg.read()
 
+# === Rename columns ===
+df = df.rename(columns={
+    "datetime": "forecast_date",
+    "datetime_utc": "forecast_date_utc",
+    "predicted_us_aqi": "us_aqi",
+    "prediction_date": "prediction_time",
+    "model_version": "model_version"
+})
+
 # Ensure datetime is parsed
 df['forecast_date'] = pd.to_datetime(df['forecast_date'])
+df['forecast_date_utc'] = pd.to_datetime(df['forecast_date_utc'])
 df['prediction_time'] = pd.to_datetime(df['prediction_time'])
+
+# === Convert to Pakistan timezone (Asia/Karachi) ===
+df['forecast_date'] = df['forecast_date'].dt.tz_convert("Asia/Karachi")
+df['forecast_date_utc'] = df['forecast_date_utc'].dt.tz_convert("Asia/Karachi")
+df['prediction_time'] = df['prediction_time'].dt.tz_convert("Asia/Karachi")
 
 # === Keep only the latest prediction run ===
 latest_run_time = df['prediction_time'].max()
