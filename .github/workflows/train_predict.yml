@@ -25,6 +25,6 @@ jobs:
 
       - name: Run AQI Pipeline
         env:
-          HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
+          HOPSWORKS_API_KEY: ${{ secrets.API }}
         run: |
           python new_pipeline.py
