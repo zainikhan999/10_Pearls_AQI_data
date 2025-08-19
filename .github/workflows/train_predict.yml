@@ -20,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install hopsworks[python] confluent-kafka requests
+          run: pip install -r requirements.txt
       - name: Run AQI Pipeline
         env:
           HOPSWORKS_API_KEY: ${{ secrets.API }}
