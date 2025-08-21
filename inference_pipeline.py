@@ -62,9 +62,17 @@ class AQIInferencePipeline:
 
     def fetch_forecast_data(self):
         """Fetch pollutant forecast data for next HORIZON_H hours."""
-        now_utc = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-        start_utc = (now_utc + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        end_utc = (now_utc + timedelta(hours=self.config['HORIZON_H'])).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Get last training time from model
+        project = hopsworks.login(api_key_value=API_KEY, project="weather_aqi")
+        mr = project.get_model_registry()
+        model_meta = mr.get_model(self.config['MODEL_NAME'], version=None)
+        model_dir = model_meta.download()
+        last_trained_time = joblib.load(os.path.join(model_dir, "last_trained_timestamp.pkl"))
+    
+    # Start from AFTER last training
+        start_utc = (last_trained_time + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_utc = (last_trained_time + timedelta(hours=self.config['HORIZON_H']+1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         air_url = "https://air-quality-api.open-meteo.com/v1/air-quality"
         params = {
             "latitude": self.config['LATITUDE'],
