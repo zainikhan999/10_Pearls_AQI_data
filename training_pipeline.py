@@ -168,55 +168,45 @@ class AQITrainingPipeline:
         
         logger.info(f"Training with {len(feature_cols)} features on {len(X_train)} samples")
         
+        # Create train/validation split for early stopping
+        split_idx = int(len(X_train) * 0.8)
+        X_train_split = X_train.iloc[:split_idx]
+        y_train_split = y_train.iloc[:split_idx]
+        X_val_split = X_train.iloc[split_idx:]
+        y_val_split = y_train.iloc[split_idx:]
+        
+        train_dataset = lgb.Dataset(X_train_split, label=y_train_split)
+        valid_dataset = lgb.Dataset(X_val_split, label=y_val_split, reference=train_dataset)
+        
+        params = {
+            'objective': 'regression',
+            'metric': 'mae',
+            'boosting_type': 'gbdt',
+            'num_leaves': 31,
+            'learning_rate': 0.05,
+            'feature_fraction': 0.8,
+            'bagging_fraction': 0.8,
+            'bagging_freq': 5,
+            'verbose': -1,
+            'random_state': 42
+        }
+        
         if is_incremental and existing_model is not None:
-            # Incremental training: retrain existing model with new data
             logger.info("Performing incremental training on existing model")
-            
-            # Use same parameters as existing model but retrain
-            # Note: LightGBM doesn't support true incremental learning
-            # So we retrain with combined data approach or use existing model as init_model
-            
-            train_dataset = lgb.Dataset(X_train, label=y_train)
-            
-            # Train new model with existing model as starting point (warm start)
             model = lgb.train(
-                params={
-                    'objective': 'regression',
-                    'metric': 'mae',
-                    'boosting_type': 'gbdt',
-                    'num_leaves': 31,
-                    'learning_rate': 0.05,
-                    'feature_fraction': 0.8,
-                    'bagging_fraction': 0.8,
-                    'bagging_freq': 5,
-                    'verbose': -1,
-                    'random_state': 42
-                },
+                params=params,
                 train_set=train_dataset,
-                num_boost_round=100,  # Add fewer rounds for incremental
-                init_model=existing_model,  # Use existing model as starting point
+                valid_sets=[valid_dataset],
+                num_boost_round=100,
+                init_model=existing_model,
                 callbacks=[lgb.early_stopping(stopping_rounds=10)]
             )
         else:
-            # Fresh training
             logger.info("Performing fresh model training")
-            
-            train_dataset = lgb.Dataset(X_train, label=y_train)
-            
             model = lgb.train(
-                params={
-                    'objective': 'regression',
-                    'metric': 'mae',
-                    'boosting_type': 'gbdt',
-                    'num_leaves': 31,
-                    'learning_rate': 0.05,
-                    'feature_fraction': 0.8,
-                    'bagging_fraction': 0.8,
-                    'bagging_freq': 5,
-                    'verbose': -1,
-                    'random_state': 42
-                },
+                params=params,
                 train_set=train_dataset,
+                valid_sets=[valid_dataset],
                 num_boost_round=200,
                 callbacks=[lgb.early_stopping(stopping_rounds=20)]
             )
