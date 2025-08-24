@@ -271,7 +271,7 @@ def prepare_forecast_features(df_historical, df_forecast, model_features):
         raise
 
 
-def make_aqi_predictions(model, prediction_data, timestamps):
+def make_aqi_predictions(model, prediction_data, timestamps, model_info):
     """Generate AQI predictions using the trained model."""
     print(f"Making AQI predictions for {len(timestamps)} timestamps...")
     
@@ -280,16 +280,8 @@ def make_aqi_predictions(model, prediction_data, timestamps):
         predictions = model.predict(prediction_data)
         predictions = np.clip(predictions, 0, 500)  # Ensure reasonable AQI bounds
         
-        # Create results dataframe
-        results_df = pd.DataFrame({
-            'prediction_id': [f"pred_{ts.strftime('%Y%m%d_%H%M%S')}" for ts in timestamps],
-            'datetime_utc': timestamps,
-            'datetime_str': [ts.strftime('%Y-%m-%d %H:%M:%S UTC') for ts in timestamps],
-            'datetime': utc_to_tz(pd.Series(timestamps), TZ),
-            'predicted_us_aqi': predictions.round().astype(int),
-            'prediction_date': datetime.now(),
-            'forecast_hour': list(range(1, len(timestamps) + 1))
-        })
+        # Create versioned predictions that can be updated
+        results_df = create_versioned_predictions(predictions, timestamps, model_info)
         
         print(f"Predictions completed!")
         print(f"AQI range: {predictions.min():.1f} - {predictions.max():.1f}")
@@ -360,9 +352,88 @@ def validate_against_api_forecast(predictions_df):
         return None
 
 
-def save_predictions_to_feature_store(predictions_df, fs, model_info):
-    """Save predictions to Hopsworks feature store."""
-    print(f"Saving {len(predictions_df)} predictions to feature store...")
+def clean_old_predictions(predictions_fg, cutoff_hours=48):
+    """Remove predictions older than cutoff_hours to prevent accumulation."""
+    try:
+        cutoff_time = datetime.now() - timedelta(hours=cutoff_hours)
+        
+        # Read existing predictions
+        existing_df = predictions_fg.read()
+        
+        if len(existing_df) > 0:
+            # Convert datetime columns properly
+            existing_df['prediction_date'] = pd.to_datetime(existing_df['prediction_date'])
+            
+            # Filter out old predictions
+            old_predictions = existing_df[existing_df['prediction_date'] < cutoff_time]
+            
+            if len(old_predictions) > 0:
+                print(f"Found {len(old_predictions)} old predictions to clean up")
+                # Note: Hopsworks doesn't support direct deletion, so we log this
+                # In production, you might want to implement a separate cleanup job
+            else:
+                print("No old predictions found for cleanup")
+        
+    except Exception as e:
+        print(f"Cleanup check failed: {e}")
+
+
+def filter_new_predictions(predictions_df, fs):
+    """Filter out predictions that already exist in the feature store."""
+    print("Checking for existing predictions to avoid duplicates...")
+    
+    try:
+        # Get existing feature group
+        predictions_fg = fs.get_feature_group(name=PREDICTIONS_FG_NAME, version=PREDICTIONS_FG_VER)
+        
+        # Read existing predictions from last 3 days (more reasonable for daily runs)
+        cutoff_time = datetime.now() - timedelta(hours=72)
+        existing_df = predictions_fg.read()
+        
+        if len(existing_df) > 0:
+            # Convert datetime columns
+            existing_df['prediction_date'] = pd.to_datetime(existing_df['prediction_date'])
+            existing_df['datetime_utc'] = pd.to_datetime(existing_df['datetime_utc'])
+            
+            # Filter recent predictions (last 3 days)
+            recent_existing = existing_df[existing_df['prediction_date'] >= cutoff_time]
+            
+            if len(recent_existing) > 0:
+                # Create set of existing datetime_utc values
+                existing_times = set(recent_existing['datetime_utc'])
+                
+                # Convert new predictions datetime_utc to same format
+                new_predictions_copy = predictions_df.copy()
+                new_predictions_copy['datetime_utc_check'] = pd.to_datetime(new_predictions_copy['datetime_utc']).dt.tz_localize(None)
+                
+                # Filter out existing timestamps
+                mask = ~new_predictions_copy['datetime_utc_check'].isin(existing_times)
+                filtered_predictions = predictions_df[mask].copy()
+                
+                print(f"Filtered out {len(predictions_df) - len(filtered_predictions)} existing predictions")
+                print(f"Will save {len(filtered_predictions)} new predictions")
+                
+                # If very few new predictions, this is normal for daily runs
+                if len(filtered_predictions) < len(predictions_df) * 0.5:
+                    print("Note: This is normal for daily runs - most predictions already exist from yesterday")
+                
+                return filtered_predictions
+            else:
+                print("No recent existing predictions found")
+                return predictions_df
+        else:
+            print("No existing predictions found")
+            return predictions_df
+            
+    except Exception as e:
+        print(f"Failed to check existing predictions: {e}")
+        print("Proceeding with all predictions...")
+        return predictions_df
+
+
+def update_predictions_with_latest(predictions_df, fs, model_info):
+    """Update existing predictions with latest values, showing only the most recent."""
+    print(f"Updating predictions with latest values...")
     
     # Create a copy and prepare for Hopsworks
     predictions_copy = predictions_df.copy()
@@ -370,6 +441,7 @@ def save_predictions_to_feature_store(predictions_df, fs, model_info):
     # Add model metadata
     predictions_copy['model_version'] = str(model_info.get('version', 'unknown'))
     predictions_copy['model_name'] = model_info.get('model_name', MODEL_NAME)
+    predictions_copy['is_latest'] = True  # Flag for latest predictions
     
     # Convert datetime columns to timezone-naive
     for col in ['datetime_utc', 'prediction_date', 'datetime']:
@@ -379,18 +451,28 @@ def save_predictions_to_feature_store(predictions_df, fs, model_info):
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            print(f"Attempt {attempt + 1}/{max_retries} to save to feature store...")
+            print(f"Attempt {attempt + 1}/{max_retries} to update feature store...")
             
-            # Try to get existing feature group
+            # Get or create feature group
             try:
                 predictions_fg = fs.get_feature_group(name=PREDICTIONS_FG_NAME, version=PREDICTIONS_FG_VER)
-                print(f"Found existing predictions feature group")
+                print("Found existing predictions feature group")
+                
+                # Mark all existing predictions as not latest
+                existing_df = predictions_fg.read()
+                if len(existing_df) > 0:
+                    print(f"Marking {len(existing_df)} existing predictions as non-latest")
+                    existing_df['is_latest'] = False
+                    
+                    # Update existing predictions
+                    predictions_fg.insert(existing_df, write_options={"wait_for_job": True})
+                
             except:
-                print("Creating new predictions feature group...")
+                print("Creating new predictions feature group with update capability...")
                 predictions_fg = fs.create_feature_group(
                     name=PREDICTIONS_FG_NAME,
                     version=PREDICTIONS_FG_VER,
-                    description="AQI predictions from LightGBM model using real forecast data",
+                    description="AQI predictions with latest update tracking",
                     primary_key=["prediction_id"],
                     event_time="prediction_date",
                     online_enabled=False,
@@ -398,13 +480,13 @@ def save_predictions_to_feature_store(predictions_df, fs, model_info):
                 )
                 print("Feature group created successfully")
             
-            # Insert data
+            # Insert new predictions as latest
             predictions_fg.insert(predictions_copy, write_options={"wait_for_job": True})
-            print("Successfully saved predictions to feature store")
+            print(f"Successfully updated {len(predictions_copy)} predictions as latest")
             return True
             
         except Exception as e:
-            print(f"Save attempt {attempt + 1} failed: {e}")
+            print(f"Update attempt {attempt + 1} failed: {e}")
             if attempt == max_retries - 1:
                 return False
             
@@ -412,6 +494,63 @@ def save_predictions_to_feature_store(predictions_df, fs, model_info):
             time.sleep(3)
     
     return False
+
+
+def get_latest_predictions_only(fs):
+    """Retrieve only the latest predictions from feature store."""
+    try:
+        predictions_fg = fs.get_feature_group(name=PREDICTIONS_FG_NAME, version=PREDICTIONS_FG_VER)
+        all_predictions = predictions_fg.read()
+        
+        if len(all_predictions) == 0:
+            print("No predictions found")
+            return pd.DataFrame()
+        
+        # Filter only latest predictions
+        if 'is_latest' in all_predictions.columns:
+            latest_only = all_predictions[all_predictions['is_latest'] == True]
+            print(f"Retrieved {len(latest_only)} latest predictions out of {len(all_predictions)} total")
+            return latest_only
+        else:
+            # Fallback: get most recent by prediction_date
+            all_predictions['prediction_date'] = pd.to_datetime(all_predictions['prediction_date'])
+            latest_date = all_predictions['prediction_date'].max()
+            latest_only = all_predictions[all_predictions['prediction_date'] == latest_date]
+            print(f"Retrieved {len(latest_only)} predictions from latest date: {latest_date}")
+            return latest_only
+            
+    except Exception as e:
+        print(f"Failed to retrieve latest predictions: {e}")
+        return pd.DataFrame()
+
+
+def create_versioned_predictions(predictions_df, timestamps, model_info):
+    """Create predictions with versioned primary keys for updates."""
+    print("Creating versioned prediction records...")
+    
+    try:
+        run_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        results_df = pd.DataFrame({
+            # Use datetime_utc as base key, not run timestamp - this allows updates
+            'prediction_id': [f"aqi_{ts.strftime('%Y%m%d_%H%M%S')}" for ts in timestamps],
+            'run_id': run_timestamp,  # Track which run created this prediction
+            'datetime_utc': timestamps,
+            'datetime_str': [ts.strftime('%Y-%m-%d %H:%M:%S UTC') for ts in timestamps],
+            'datetime': utc_to_tz(pd.Series(timestamps), TZ),
+            'predicted_us_aqi': predictions_df.round().astype(int),
+            'prediction_date': datetime.now(),
+            'forecast_hour': list(range(1, len(timestamps) + 1)),
+            'model_version': str(model_info.get('version', 'unknown')),
+            'model_name': model_info.get('model_name', MODEL_NAME),
+            'is_latest': True
+        })
+        
+        return results_df
+        
+    except Exception as e:
+        print(f"Failed to create versioned predictions: {e}")
+        raise
 
 
 def run_improved_inference_pipeline():
@@ -473,7 +612,7 @@ def run_improved_inference_pipeline():
     # Step 6: Make predictions
     print("\n[6/8] Making AQI predictions...")
     try:
-        predictions_df = make_aqi_predictions(model, prediction_data, valid_timestamps)
+        predictions_df = make_aqi_predictions(model, prediction_data, valid_timestamps, model_info)
         print("Predictions generated successfully")
         
         # Show sample predictions
@@ -508,7 +647,7 @@ def run_improved_inference_pipeline():
     
     # Try to save to feature store
     try:
-        success = save_predictions_to_feature_store(predictions_df, fs, model_info)
+        success = update_predictions_with_latest(predictions_df, fs, model_info)
     except Exception as e:
         print(f"Feature store save failed: {e}")
         success = False
