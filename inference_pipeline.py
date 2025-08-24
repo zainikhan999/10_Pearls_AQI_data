@@ -298,7 +298,7 @@ def save_predictions_to_feature_store(predictions_df, fs, model_info):
                 event_time="prediction_date",
                 online_enabled=True
             )
-        
+        predictions_fg.save()
         # Insert predictions
         predictions_fg.insert(predictions_df, write_options={"wait_for_job": True})
         print("Successfully saved predictions to feature store")
