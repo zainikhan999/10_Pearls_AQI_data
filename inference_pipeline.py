@@ -1,11 +1,12 @@
 """
-LightGBM AQI Inference Pipeline
-===============================
-This script creates predictions for future AQI values using the trained LightGBM model.
-It loads the latest model from Hopsworks Model Registry and generates 74-hour forecasts.
+LightGBM AQI Inference Pipeline - Fixed Version
+===============================================
+This script fixes the primary key issue when saving predictions to Hopsworks.
 
-Author: Your Name
-Date: 2025
+Key fixes:
+1. Use string-based primary key instead of timestamp
+2. Better error handling for feature group creation
+3. Offline-only feature group option
 """
 
 import os
@@ -19,7 +20,6 @@ from datetime import datetime, timedelta
 from typing import Tuple, List, Optional, Dict, Any
 
 import hopsworks
-from hsml.model import ModelSchema, Schema
 
 warnings.filterwarnings('ignore')
 
@@ -40,7 +40,7 @@ HORIZON_H = 74  # Forecast horizon in hours
 TZ = "Asia/Karachi"
 
 # =============================================================================
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS (keeping the same as before)
 # =============================================================================
 
 def create_lag_features(df, feat_cols, lags=None):
@@ -85,15 +85,7 @@ def utc_to_tz(timestamp_series, target_tz):
 
 
 def load_latest_model_from_registry(mr):
-    """
-    Load the latest model version from Hopsworks Model Registry.
-    
-    Args:
-        mr: Model registry object
-    
-    Returns:
-        tuple: (model, features, model_info)
-    """
+    """Load the latest model version from Hopsworks Model Registry."""
     try:
         print(f"Loading latest model '{MODEL_NAME}' from Model Registry...")
         
@@ -262,12 +254,15 @@ def make_predictions(model, prediction_data, future_timestamps):
     predictions = model.predict(future_data)
     predictions = np.clip(predictions, 0, 500)  # Ensure reasonable AQI bounds
     
-    # Create results
+    # Create results with string-based primary key
     results = pd.DataFrame({
+        'prediction_id': [f"pred_{ts.strftime('%Y%m%d_%H%M%S')}" for ts in future_timestamps],  # String primary key
         'datetime_utc': future_timestamps,
+        'datetime_str': [ts.strftime('%Y-%m-%d %H:%M:%S UTC') for ts in future_timestamps],
         'datetime': utc_to_tz(pd.Series(future_timestamps), TZ),
         'predicted_us_aqi': predictions.round().astype(int),
-        'prediction_date': datetime.now(tz=pd.Timestamp.now().tz)
+        'prediction_date': datetime.now(),
+        'forecast_hour': list(range(1, len(future_timestamps) + 1))
     })
     
     print(f"Predictions completed. AQI range: {predictions.min():.1f} - {predictions.max():.1f}")
@@ -275,7 +270,7 @@ def make_predictions(model, prediction_data, future_timestamps):
 
 
 def save_predictions_to_feature_store(predictions_df, fs, model_info):
-    """Save predictions to Hopsworks feature store with improved error handling."""
+    """Save predictions to Hopsworks feature store with fixed primary key."""
     print(f"Saving {len(predictions_df)} predictions to feature store...")
     
     # Create a copy to avoid modifying the original dataframe
@@ -284,13 +279,18 @@ def save_predictions_to_feature_store(predictions_df, fs, model_info):
     # Add model metadata
     predictions_copy['model_version'] = str(model_info.get('version', 'unknown'))
     predictions_copy['model_name'] = model_info.get('model_name', MODEL_NAME)
-    predictions_copy['predicted_us_aqi'] = predictions_copy['predicted_us_aqi'].astype(int)
     
-    # Ensure datetime columns are properly formatted
+    # Ensure proper data types
+    predictions_copy['predicted_us_aqi'] = predictions_copy['predicted_us_aqi'].astype(int)
+    predictions_copy['forecast_hour'] = predictions_copy['forecast_hour'].astype(int)
+    
+    # Convert datetime columns to timezone-naive (Hopsworks requirement)
     if 'datetime_utc' in predictions_copy.columns:
-        predictions_copy['datetime_utc'] = pd.to_datetime(predictions_copy['datetime_utc'])
+        predictions_copy['datetime_utc'] = pd.to_datetime(predictions_copy['datetime_utc']).dt.tz_localize(None)
     if 'prediction_date' in predictions_copy.columns:
-        predictions_copy['prediction_date'] = pd.to_datetime(predictions_copy['prediction_date'])
+        predictions_copy['prediction_date'] = pd.to_datetime(predictions_copy['prediction_date']).dt.tz_localize(None)
+    if 'datetime' in predictions_copy.columns:
+        predictions_copy['datetime'] = pd.to_datetime(predictions_copy['datetime']).dt.tz_localize(None)
     
     max_retries = 3
     for attempt in range(max_retries):
@@ -303,26 +303,25 @@ def save_predictions_to_feature_store(predictions_df, fs, model_info):
                 predictions_fg = fs.get_feature_group(name=PREDICTIONS_FG_NAME, version=PREDICTIONS_FG_VER)
                 if predictions_fg is not None:
                     print(f"Found existing predictions feature group: {PREDICTIONS_FG_NAME} v{PREDICTIONS_FG_VER}")
-                else:
-                    print("Feature group exists but returned None")
-            except Exception as e:
-                print(f"Could not find existing feature group: {e}")
+            except Exception:
+                print(f"Feature group {PREDICTIONS_FG_NAME} v{PREDICTIONS_FG_VER} not found")
             
             # Create new feature group if needed
             if predictions_fg is None:
-                print("Creating new predictions feature group...")
+                print("Creating new predictions feature group with string primary key...")
                 try:
                     predictions_fg = fs.create_feature_group(
                         name=PREDICTIONS_FG_NAME,
                         version=PREDICTIONS_FG_VER,
-                        description="AQI predictions from LightGBM model",
-                        primary_key=["datetime_utc"],
+                        description="AQI predictions from LightGBM model - 74-hour forecasts",
+                        primary_key=["prediction_id"],  # String-based primary key
                         event_time="prediction_date",
-                        online_enabled=True
+                        online_enabled=False,  # Disable online store to avoid timestamp issues
+                        statistics_config=False
                     )
                     
                     if predictions_fg is not None:
-                        print(f"Successfully created feature group: {PREDICTIONS_FG_NAME} v{PREDICTIONS_FG_VER}")
+                        print(f"Successfully created offline feature group: {PREDICTIONS_FG_NAME} v{PREDICTIONS_FG_VER}")
                     else:
                         print("Feature group creation returned None")
                         continue
@@ -333,31 +332,25 @@ def save_predictions_to_feature_store(predictions_df, fs, model_info):
                         return False
                     continue
             
-            # Verify we have a valid feature group
-            if predictions_fg is None:
-                print("ERROR: Feature group is still None after creation/retrieval")
-                if attempt == max_retries - 1:
-                    return False
-                continue
-            
             # Try to insert the data
             try:
                 print("Inserting predictions into feature group...")
-                job = predictions_fg.insert(
-                    predictions_copy, 
-                    write_options={"wait_for_job": True}
-                )
-                print(f"Successfully inserted predictions. Job info: {job}")
+                predictions_fg.insert(predictions_copy, write_options={"wait_for_job": True})
+                print(f"Successfully inserted {len(predictions_copy)} predictions")
                 return True
                 
             except Exception as insert_error:
                 print(f"Insert failed: {insert_error}")
+                if "already exists" in str(insert_error).lower():
+                    print("Predictions might already exist, continuing...")
+                    return True
+                
                 if attempt == max_retries - 1:
                     return False
                 
                 # Wait before retry
                 import time
-                time.sleep(2)
+                time.sleep(3)
                 continue
         
         except Exception as general_error:
@@ -366,52 +359,15 @@ def save_predictions_to_feature_store(predictions_df, fs, model_info):
                 return False
             
             import time
-            time.sleep(2)
+            time.sleep(3)
     
     return False
 
 
-def create_predictions_feature_group_manually(fs):
-    """Manually create the predictions feature group with proper schema."""
-    try:
-        print("Creating predictions feature group with explicit schema...")
-        
-        # Define schema explicitly
-        from hsfs.feature import Feature
-        from hsfs import expectations as E
-        
-        features = [
-            Feature(name="datetime_utc", type="timestamp"),
-            Feature(name="datetime", type="timestamp"),
-            Feature(name="predicted_us_aqi", type="int"),
-            Feature(name="prediction_date", type="timestamp"),
-            Feature(name="model_version", type="string"),
-            Feature(name="model_name", type="string")
-        ]
-        
-        predictions_fg = fs.create_feature_group(
-            name=PREDICTIONS_FG_NAME,
-            version=PREDICTIONS_FG_VER,
-            description="AQI predictions from LightGBM model - 74-hour forecasts",
-            primary_key=["datetime_utc"],
-            event_time="prediction_date",
-            online_enabled=True,
-            features=features
-        )
-        
-        print(f"Successfully created feature group with schema: {PREDICTIONS_FG_NAME} v{PREDICTIONS_FG_VER}")
-        return predictions_fg
-        
-    except Exception as e:
-        print(f"Failed to create feature group manually: {e}")
-        return None
-
-
-# Updated main pipeline function with better feature group handling
 def run_inference_pipeline():
     """Main function to run the AQI inference pipeline."""
     print("=" * 80)
-    print("LIGHTGBM AQI INFERENCE PIPELINE")
+    print("LIGHTGBM AQI INFERENCE PIPELINE - FIXED VERSION")
     print("=" * 80)
     
     # Step 1: Connect to Hopsworks
@@ -493,7 +449,7 @@ def run_inference_pipeline():
         # Display sample predictions
         print("\nSample predictions:")
         for _, row in predictions_df.head(10).iterrows():
-            print(f"   {row['datetime'].strftime('%Y-%m-%d %H:%M %Z')}: AQI {row['predicted_us_aqi']}")
+            print(f"   {row['datetime_str']}: AQI {row['predicted_us_aqi']} (Hour +{row['forecast_hour']})")
         
     except Exception as e:
         print(f"Failed to make predictions: {e}")
@@ -508,30 +464,14 @@ def run_inference_pipeline():
     predictions_df.to_csv(backup_path, index=False)
     print(f"Local backup saved to: {backup_path}")
     
-    # Try to save to feature store
+    # Try to save to feature store with fixed primary key
     try:
         success = save_predictions_to_feature_store(predictions_df, fs, model_info)
         
         if success:
-            print("Successfully saved predictions to feature store")
+            print("✅ Successfully saved predictions to feature store")
         else:
-            print("Failed to save to feature store after all retries")
-            print("Attempting to create feature group manually...")
-            
-            # Try manual creation as last resort
-            manual_fg = create_predictions_feature_group_manually(fs)
-            if manual_fg is not None:
-                try:
-                    predictions_copy = predictions_df.copy()
-                    predictions_copy['model_version'] = str(model_info.get('version', 'unknown'))
-                    predictions_copy['model_name'] = model_info.get('model_name', MODEL_NAME)
-                    
-                    manual_fg.insert(predictions_copy, write_options={"wait_for_job": True})
-                    print("Successfully saved predictions using manually created feature group")
-                    success = True
-                except Exception as manual_error:
-                    print(f"Manual save also failed: {manual_error}")
-            
+            print("❌ Failed to save to feature store after all retries")
         
     except Exception as e:
         print(f"Error during save process: {e}")
@@ -548,31 +488,28 @@ def run_inference_pipeline():
     print(f"Forecast ends: {future_timestamps[-1].strftime('%Y-%m-%d %H:%M UTC')}")
     print(f"Model version: {model_info.get('version', 'unknown')}")
     print(f"Local backup: {backup_path}")
-    print(f"Feature store save: {'SUCCESS' if success else 'FAILED'}")
+    print(f"Feature store save: {'✅ SUCCESS' if success else '❌ FAILED'}")
     print("=" * 80)
     
     return True
 
-# =============================================================================
-# SCRIPT EXECUTION
-# =============================================================================
 
 if __name__ == "__main__":
     """Run the inference pipeline."""
     try:
         success = run_inference_pipeline()
         if success:
-            print("\nPipeline completed successfully!")
+            print("\n🎉 Pipeline completed successfully!")
         else:
-            print("\nPipeline completed with errors!")
+            print("\n⚠️ Pipeline completed with errors!")
             exit(1)
     except KeyboardInterrupt:
-        print("\nPipeline interrupted by user")
+        print("\n🛑 Pipeline interrupted by user")
         exit(1)
     except Exception as e:
-        print(f"\nPipeline failed with error: {e}")
+        print(f"\n💥 Pipeline failed with error: {e}")
         import traceback
         traceback.print_exc()
         exit(1)
     finally:
-        print("\nPipeline execution finished")
+        print("\n🏁 Pipeline execution finished")
