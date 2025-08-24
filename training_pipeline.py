@@ -420,7 +420,8 @@ def retrain_model():
         
         # Determine next version
         model_name = "lgb_aqi_forecaster"
-        current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
+        current_time = datetime.now()
+        current_time_str = current_time.strftime('%Y%m%d_%H%M%S')
         
         try:
             existing_models = mr.get_models(model_name)
@@ -435,34 +436,44 @@ def retrain_model():
             next_version = 1
             print(f"🆕 Creating new model. Version: {next_version}")
         
+        # Create metrics dictionary with only numeric values
+        # Convert timestamp to Unix epoch (numeric) for Hopsworks compatibility
+        metrics_dict = {
+            "mae": float(mae),
+            "rmse": float(rmse),
+            "r2": float(r2),
+            "training_samples": int(len(X_train)),
+            "validation_samples": int(len(X_val)),
+            "retrain_timestamp_epoch": float(current_time.timestamp()),  # Numeric timestamp
+            "feature_count": int(len(all_feature_cols))
+        }
+        
+        print(f"📊 Model metrics: {metrics_dict}")
+        
         # Create and save model
         model_meta = mr.python.create_model(
             name=model_name,
             version=next_version,
-            metrics={
-                "mae": mae,
-                "rmse": rmse,
-                "r2": r2,
-                "training_samples": len(X_train),
-                "validation_samples": len(X_val),
-                "retrain_timestamp": current_time
-            },
+            metrics=metrics_dict,
             model_schema=model_schema,
-            description=f"LightGBM AQI forecaster v{next_version} - Retrained on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} with {len(X_train)} samples"
+            description=f"LightGBM AQI forecaster v{next_version} - Retrained on {current_time.strftime('%Y-%m-%d %H:%M:%S')} with {len(X_train)} samples. R²={r2:.4f}, RMSE={rmse:.2f}"
         )
         
         model_meta.save(ARTIFACT_DIR)
         print(f"✅ Model v{next_version} successfully saved to registry!")
         
-        # Save version info locally
+        # Save version info locally with readable timestamp
         version_info = {
             "model_name": model_name,
             "version": next_version,
-            "retrain_timestamp": current_time,
+            "retrain_timestamp": current_time_str,
+            "retrain_datetime": current_time.isoformat(),
             "mae": float(mae),
             "rmse": float(rmse),
             "r2": float(r2),
             "training_samples": len(X_train),
+            "validation_samples": len(X_val),
+            "feature_count": len(all_feature_cols),
             "last_data_timestamp": str(new_last_timestamp)
         }
         
@@ -475,6 +486,9 @@ def retrain_model():
         print(f"⚠️  Failed to save to Model Registry: {e}")
         import traceback
         traceback.print_exc()
+        
+        # Still save locally even if Hopsworks fails
+        print("💾 Continuing with local artifact saving...")
     
     # Final summary
     print("\n" + "=" * 80)
@@ -495,6 +509,7 @@ def retrain_model():
                 version_info = json.load(f)
             print(f"🔢 Model version: {version_info['version']}")
             print(f"📝 Model name: {version_info['model_name']}")
+            print(f"🔧 Features used: {version_info['feature_count']}")
     except:
         pass
     
