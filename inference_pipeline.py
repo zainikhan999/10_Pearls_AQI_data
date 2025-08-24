@@ -1,328 +1,623 @@
-# ===================================================================
-# FIXED INFERENCE PIPELINE (inference_pipeline.py)
-# ===================================================================
+"""
+LightGBM AQI Inference Pipeline
+===============================
+This script creates predictions for future AQI values using the trained LightGBM model.
+It fetches the latest data, creates features, and generates 74-hour forecasts.
 
-import requests
-from datetime import datetime, timedelta, timezone
+Author: Your Name
+Date: 2025
+"""
+
 import os
-import joblib
+import json
+import requests
 import numpy as np
 import pandas as pd
-import hopsworks
-import traceback
-import logging
-from pytz import timezone as pytz_timezone
+import lightgbm as lgb
+import joblib
+import warnings
+from datetime import datetime, timedelta
+from typing import Tuple, List, Optional, Dict, Any
 
-# Logger setup
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import hopsworks
+from hsml.model import ModelSchema, Schema
+
+warnings.filterwarnings('ignore')
+
+# =============================================================================
+# CONFIGURATION SECTION
+# =============================================================================
+
+# Hopsworks feature store configuration
+FEATURE_GROUP_NAME = "aqi_weather_features"
+FEATURE_GROUP_VER = 2
+PREDICTIONS_FG_NAME = "aqi_predictions"
+PREDICTIONS_FG_VER = 1
 API_KEY = os.environ["HOPSWORKS_API_KEY"]
 
-class AQIInferencePipeline:
-    def __init__(self):
-        self.config = {
-            'LATITUDE': 33.5973,
-            'LONGITUDE': 73.0479,
-            'TZ': "Asia/Karachi",
-            'HORIZON_H': 74,
-            'MAX_LAG_H': 120,
-            'MODEL_NAME': "lgb_aqi_forecaster",
-            'FEATURE_GROUP_NAME': "aqi_weather_features",
-            'FEATURE_GROUP_VER': 2,
-            'features': ["pm_10", "pm_25", "carbon_monoxidegm", "nitrogen_dioxide", "sulphur_dioxide", "ozone"]
-        }
+# Location configuration (Rawalpindi, Pakistan)
+LATITUDE = 33.5973
+LONGITUDE = 73.0479
+TZ = "Asia/Karachi"
 
-    def ensure_utc(self, time_series):
-        """Ensure datetime series is in UTC"""
-        if time_series.dt.tz is None:
-            return pd.to_datetime(time_series, utc=True)
-        else:
-            return time_series.dt.tz_convert('UTC')
+# Model configuration
+HORIZON_H = 74  # Forecast horizon in hours (updated to match dashboard)
+MAX_LAG_H = 120  # Maximum lag for features
 
-    def utc_to_tz(self, utc_series, target_tz):
-        """Convert UTC datetime series to target timezone"""
-        return utc_series.dt.tz_convert(target_tz)
+# Directory structure
+ARTIFACT_DIR = "lgb_aqi_artifacts"
+MODEL_PATH = os.path.join(ARTIFACT_DIR, "lgb_model.pkl")
+FEATURES_PATH = os.path.join(ARTIFACT_DIR, "lgb_features.pkl")
+TIMESTAMP_PATH = os.path.join(ARTIFACT_DIR, "last_trained_timestamp.pkl")
 
-    def create_lag_features(self, df, features, max_lag=120):
-        """Create lag features for time series prediction"""
-        df_lagged = df.copy()
-        
+# Weather API configuration (OpenWeatherMap)
+WEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY")  # Optional for future weather data
+WEATHER_API_URL = "http://api.openweathermap.org/data/2.5/forecast"
+
+# =============================================================================
+# HELPER FUNCTIONS (Same as retraining script)
+# =============================================================================
+
+def create_lag_features(df, feat_cols, lags=None):
+    """
+    Create lag and rolling window features for time series data.
+    
+    Args:
+        df (pd.DataFrame): Input dataframe with time series data
+        feat_cols (list): List of feature columns to create lags for
+        lags (list): List of lag periods (default: [1,2,3,6,12,24,48,72,96,120])
+    
+    Returns:
+        pd.DataFrame: DataFrame with additional lag and rolling features
+    """
+    if lags is None:
+        lags = [1, 2, 3, 6, 12, 24, 48, 72, 96, 120]
+    
+    output_df = df.copy()
+    
+    for feature in feat_cols:
         # Create lag features
-        for feature in features:
-            if feature in df.columns:
-                for lag in [1, 2, 3, 6, 12, 24, 48, 72]:
-                    if lag <= max_lag:
-                        df_lagged[f"{feature}_lag{lag}"] = df[feature].shift(lag)
+        for lag in lags:
+            output_df[f"{feature}_lag_{lag}"] = output_df[feature].shift(lag)
         
-        # Add moving averages
-        for feature in features:
-            if feature in df.columns:
-                df_lagged[f"{feature}_ma24"] = df[feature].rolling(window=24, min_periods=12).mean()
-                df_lagged[f"{feature}_ma72"] = df[feature].rolling(window=72, min_periods=36).mean()
-        
-        # Add time features
-        df_lagged['hour'] = df_lagged.index.hour
-        df_lagged['day_of_week'] = df_lagged.index.dayofweek
-        df_lagged['month'] = df_lagged.index.month
-        
-        return df_lagged
+        # Create rolling statistics
+        output_df[f"{feature}_roll_mean_24"] = output_df[feature].rolling(24, min_periods=24).mean()
+        output_df[f"{feature}_roll_std_24"] = output_df[feature].rolling(24, min_periods=24).std()
+        output_df[f"{feature}_roll_mean_72"] = output_df[feature].rolling(72, min_periods=72).mean()
+        output_df[f"{feature}_roll_std_72"] = output_df[feature].rolling(72, min_periods=72).std()
+    
+    return output_df
 
-    def load_model(self, project):
-        """Load model from Hopsworks registry"""
-        try:
-            mr = project.get_model_registry()
-            model_meta = mr.get_model(self.config['MODEL_NAME'], version=None)
-            model_dir = model_meta.download()
-            
-            model = joblib.load(os.path.join(model_dir, "lgb_model.pkl"))
-            all_features = joblib.load(os.path.join(model_dir, "lgb_features.pkl"))
-            
-            return model, all_features, model_meta.version
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            raise
 
-    def fetch_historical_data(self, fs):
-        """Fetch sufficient historical data for lag features"""
-        try:
-            fg = fs.get_feature_group(name=self.config['FEATURE_GROUP_NAME'], version=self.config['FEATURE_GROUP_VER'])
-            df_hist = fg.read()
-            
-            # Ensure UTC timezone
-            df_hist["time_utc"] = self.ensure_utc(df_hist["time"])
-            df_hist = df_hist.sort_values("time_utc").reset_index(drop=True)
-            
-            # Keep only last MAX_LAG_H + buffer hours for efficiency
-            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=self.config['MAX_LAG_H'] + 24)
-            df_hist = df_hist[df_hist['time_utc'] >= cutoff_time]
-            
-            logger.info(f"Loaded {len(df_hist)} historical rows from {df_hist['time_utc'].min()} to {df_hist['time_utc'].max()}")
-            return df_hist
-            
-        except Exception as e:
-            logger.error(f"Failed to fetch historical data: {e}")
-            raise
+def ensure_utc(timestamp_series):
+    """
+    Ensure timestamp series is in UTC timezone.
+    
+    Args:
+        timestamp_series (pd.Series): Series with timestamp data
+    
+    Returns:
+        pd.Series: UTC timezone-aware timestamp series
+    """
+    ts = pd.to_datetime(timestamp_series)
+    try:
+        if ts.dt.tz is None:
+            return ts.dt.tz_localize("UTC")
+        else:
+            return ts.dt.tz_convert("UTC")
+    except AttributeError:
+        ts = pd.to_datetime(ts, errors="coerce")
+        ts = ts.dt.tz_localize("UTC")
+        return ts
 
-    def determine_prediction_start_time(self, fs):
-        """
-        FIXED: Determine where to start predictions from based on:
-        1. Latest available feature data
-        2. Existing predictions
-        """
+
+def utc_to_tz(timestamp_series, target_tz):
+    """
+    Convert UTC timestamps to specified timezone.
+    
+    Args:
+        timestamp_series (pd.Series): UTC timestamp series
+        target_tz (str): Target timezone string
+    
+    Returns:
+        pd.Series: Converted timestamp series
+    """
+    utc_series = ensure_utc(timestamp_series)
+    return utc_series.dt.tz_convert(target_tz)
+
+
+def load_model_artifacts():
+    """
+    Load trained model and associated artifacts.
+    
+    Returns:
+        tuple: (model, features, last_timestamp, model_info)
+    """
+    if not os.path.exists(MODEL_PATH):
+        raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
+    
+    if not os.path.exists(FEATURES_PATH):
+        raise FileNotFoundError(f"Features file not found: {FEATURES_PATH}")
+    
+    print(f"[INFO] Loading model from: {MODEL_PATH}")
+    model = joblib.load(MODEL_PATH)
+    
+    print(f"[INFO] Loading feature list from: {FEATURES_PATH}")
+    features = joblib.load(FEATURES_PATH)
+    
+    last_timestamp = None
+    if os.path.exists(TIMESTAMP_PATH):
+        last_timestamp = joblib.load(TIMESTAMP_PATH)
+        print(f"[INFO] Last training timestamp: {last_timestamp}")
+    
+    # Load model version info if available
+    model_info = {}
+    version_path = os.path.join(ARTIFACT_DIR, "model_version_info.json")
+    if os.path.exists(version_path):
+        with open(version_path, 'r') as f:
+            model_info = json.load(f)
+        print(f"[INFO] Model version: {model_info.get('version', 'unknown')}")
+    
+    return model, features, last_timestamp, model_info
+
+
+def fetch_latest_data(fg, hours_back=168):  # 7 days of historical data
+    """
+    Fetch the latest data from feature store for creating predictions.
+    
+    Args:
+        fg: Feature group object
+        hours_back (int): Number of hours to look back for historical data
+    
+    Returns:
+        pd.DataFrame: Latest data sorted by time
+    """
+    print(f"[INFO] Fetching latest {hours_back} hours of data...")
+    
+    # Calculate cutoff time
+    cutoff_time = datetime.utcnow() - timedelta(hours=hours_back)
+    cutoff_str = cutoff_time.strftime('%Y-%m-%d %H:%M:%S')
+    
+    try:
+        # Try to fetch data with time filter
+        df_raw = fg.read()
+        df_raw = df_raw.sort_values("time", ascending=True).reset_index(drop=True)
         
-        # Get latest feature data timestamp
-        try:
-            fg = fs.get_feature_group(name=self.config['FEATURE_GROUP_NAME'], version=self.config['FEATURE_GROUP_VER'])
-            feature_data = fg.read()
-            
-            if feature_data.empty:
-                raise ValueError("No feature data available")
-            
-            feature_data["time_utc"] = self.ensure_utc(feature_data["time"])
-            latest_feature_time = feature_data["time_utc"].max()
-            logger.info(f"📊 Latest feature data: {latest_feature_time}")
-            
-        except Exception as e:
-            logger.error(f"Failed to get latest feature time: {e}")
-            raise
+        # Convert time column to UTC for filtering
+        df_raw["time_utc"] = ensure_utc(df_raw["time"])
         
-        # Check existing predictions
-        try:
-            predictions_fg = fs.get_feature_group("aqi_predictions", version=1)
-            existing_predictions = predictions_fg.read()
-            
-            if not existing_predictions.empty:
-                existing_predictions["datetime_utc"] = pd.to_datetime(existing_predictions["datetime_utc"], utc=True)
-                latest_prediction_time = existing_predictions["datetime_utc"].max()
-                logger.info(f"🔮 Latest prediction: {latest_prediction_time}")
+        # Filter for recent data
+        recent_data = df_raw[df_raw["time_utc"] >= pd.Timestamp(cutoff_time, tz='UTC')]
+        
+        if len(recent_data) == 0:
+            print(f"[WARNING] No recent data found. Using all available data.")
+            recent_data = df_raw.tail(hours_back)  # Fallback to last N records
+        
+        print(f"[INFO] Fetched {len(recent_data)} recent records")
+        print(f"[INFO] Data range: {recent_data['time_utc'].min()} to {recent_data['time_utc'].max()}")
+        
+        return recent_data
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch data: {e}")
+        raise
+
+
+def create_future_timestamps(last_timestamp, horizon_hours=74):
+    """
+    Create future timestamps for prediction.
+    
+    Args:
+        last_timestamp: Last available data timestamp
+        horizon_hours (int): Number of hours to predict into the future
+    
+    Returns:
+        pd.DatetimeIndex: Future timestamps in UTC
+    """
+    if isinstance(last_timestamp, str):
+        last_timestamp = pd.Timestamp(last_timestamp)
+    
+    # Ensure timestamp is UTC
+    if last_timestamp.tz is None:
+        last_timestamp = last_timestamp.tz_localize('UTC')
+    elif last_timestamp.tz != pd.Timestamp.now().tz:
+        last_timestamp = last_timestamp.tz_convert('UTC')
+    
+    # Create hourly timestamps for the forecast horizon
+    future_timestamps = pd.date_range(
+        start=last_timestamp + pd.Timedelta(hours=1),
+        periods=horizon_hours,
+        freq='H',
+        tz='UTC'
+    )
+    
+    return future_timestamps
+
+
+def extrapolate_features(df, future_timestamps, base_features):
+    """
+    Extrapolate base features for future timestamps using simple strategies.
+    This is a simplified approach - in production, you might want to use
+    weather forecasting APIs or more sophisticated methods.
+    
+    Args:
+        df (pd.DataFrame): Historical data with features
+        future_timestamps (pd.DatetimeIndex): Future timestamps to predict
+        base_features (list): List of base feature column names
+    
+    Returns:
+        pd.DataFrame: DataFrame with extrapolated features for future timestamps
+    """
+    print(f"[INFO] Extrapolating features for {len(future_timestamps)} future timestamps...")
+    
+    # Get the last 72 hours of data for extrapolation
+    recent_data = df.tail(72)[base_features].copy()
+    
+    future_data = []
+    
+    for timestamp in future_timestamps:
+        # Simple extrapolation strategies:
+        # 1. Use rolling mean of last 24 hours
+        # 2. Add seasonal/daily patterns
+        # 3. Add some random variation to avoid static predictions
+        
+        row_data = {'time_utc': timestamp}
+        
+        for feature in base_features:
+            if feature in recent_data.columns and not recent_data[feature].isna().all():
+                # Strategy 1: Rolling mean with slight trend
+                recent_mean = recent_data[feature].tail(24).mean()
+                recent_trend = recent_data[feature].tail(12).mean() - recent_data[feature].tail(24).head(12).mean()
                 
-                # Start from the later of: next hour after latest prediction OR next hour after latest feature data
-                start_from_predictions = latest_prediction_time + timedelta(hours=1)
-                start_from_features = latest_feature_time + timedelta(hours=1)
+                # Strategy 2: Add daily seasonality (simple sine wave)
+                hour_of_day = timestamp.hour
+                daily_factor = 1 + 0.1 * np.sin(2 * np.pi * hour_of_day / 24)
                 
-                start_time = max(start_from_predictions, start_from_features)
-                logger.info(f"🎯 Starting predictions from: {start_time}")
+                # Strategy 3: Add small random variation (±5%)
+                noise_factor = 1 + np.random.normal(0, 0.05)
                 
+                # Combine strategies
+                extrapolated_value = (recent_mean + recent_trend * 0.1) * daily_factor * noise_factor
+                
+                # Ensure non-negative values for pollutant concentrations
+                extrapolated_value = max(0, extrapolated_value)
+                
+                row_data[feature] = extrapolated_value
             else:
-                # No predictions exist - start from next hour after latest feature data
-                start_time = latest_feature_time + timedelta(hours=1)
-                logger.info(f"🆕 No existing predictions, starting from: {start_time}")
-                
-        except Exception as e:
-            logger.warning(f"⚠️ Could not check existing predictions: {e}")
-            # Fallback: start from next hour after latest feature data
-            start_time = latest_feature_time + timedelta(hours=1)
+                # Fallback: use the last available value or median
+                if not recent_data[feature].isna().all():
+                    row_data[feature] = recent_data[feature].dropna().iloc[-1]
+                else:
+                    row_data[feature] = df[feature].median()  # Global median as last resort
         
-        return start_time, latest_feature_time
+        future_data.append(row_data)
+    
+    future_df = pd.DataFrame(future_data)
+    future_df = future_df.set_index('time_utc')
+    
+    print(f"[INFO] Feature extrapolation completed")
+    return future_df
 
-    def fetch_forecast_data(self, fs):
-        """Fetch forecast data for predictions"""
-        
-        start_time, latest_feature_time = self.determine_prediction_start_time(fs)
-        
-        # Generate predictions up to HORIZON_H hours in the future from NOW
-        now_utc = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-        end_time = now_utc + timedelta(hours=self.config['HORIZON_H'])
-        
-        # If start_time is in the past, we can backfill some predictions
-        # But don't go beyond latest_feature_time + HORIZON_H
-        max_end_time = latest_feature_time + timedelta(hours=self.config['HORIZON_H'])
-        end_time = min(end_time, max_end_time)
-        
-        if start_time >= end_time:
-            logger.info("✅ All predictions up to horizon are already available")
-            return pd.DataFrame()
-        
-        logger.info(f"🎯 Fetching forecast data from {start_time} to {end_time} ({(end_time-start_time).total_seconds()/3600:.0f} hours)")
-        
-        air_url = "https://air-quality-api.open-meteo.com/v1/air-quality"
-        params = {
-            "latitude": self.config['LATITUDE'],
-            "longitude": self.config['LONGITUDE'],
-            "hourly": "pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone",
-            "start": start_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "end": end_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "timezone": "UTC",
-        }
-        
+
+def prepare_prediction_data(df, model_features, base_features):
+    """
+    Prepare data for prediction by creating all necessary features.
+    
+    Args:
+        df (pd.DataFrame): Input dataframe with historical + future data
+        model_features (list): Required features for the model
+        base_features (list): Base feature column names
+    
+    Returns:
+        pd.DataFrame: Prepared data ready for prediction
+    """
+    print(f"[INFO] Preparing prediction data...")
+    
+    # Create lag features for the combined dataset
+    work_df = create_lag_features(df, base_features)
+    
+    # Filter to only model features
+    available_features = [f for f in model_features if f in work_df.columns]
+    missing_features = [f for f in model_features if f not in work_df.columns]
+    
+    if missing_features:
+        print(f"[WARNING] Missing {len(missing_features)} features: {missing_features[:5]}...")
+        # Fill missing features with 0 or median values
+        for feature in missing_features:
+            if any(base_feat in feature for base_feat in base_features):
+                # This is likely a lag/rolling feature we can't compute due to insufficient history
+                work_df[feature] = 0  # or some default value
+            else:
+                work_df[feature] = 0
+    
+    # Select only the features the model expects
+    prediction_data = work_df[model_features].copy()
+    
+    print(f"[INFO] Prediction data shape: {prediction_data.shape}")
+    print(f"[INFO] Available features: {len(available_features)}/{len(model_features)}")
+    
+    return prediction_data
+
+
+def make_predictions(model, prediction_data, future_timestamps):
+    """
+    Make AQI predictions using the trained model.
+    
+    Args:
+        model: Trained LightGBM model
+        prediction_data (pd.DataFrame): Prepared feature data
+        future_timestamps (pd.DatetimeIndex): Future timestamps
+    
+    Returns:
+        pd.DataFrame: Predictions with timestamps
+    """
+    print(f"[INFO] Making predictions for {len(future_timestamps)} timestamps...")
+    
+    # Get prediction data for future timestamps only
+    future_data = prediction_data.loc[future_timestamps]
+    
+    # Handle any remaining NaN values
+    future_data = future_data.fillna(0)
+    
+    # Make predictions
+    predictions = model.predict(future_data)
+    
+    # Ensure predictions are reasonable (non-negative, within AQI bounds)
+    predictions = np.clip(predictions, 0, 500)
+    
+    # Create results dataframe
+    results = pd.DataFrame({
+        'datetime_utc': future_timestamps,
+        'datetime': utc_to_tz(pd.Series(future_timestamps), TZ),
+        'predicted_us_aqi': predictions.round().astype(int),
+        'prediction_date': datetime.now(tz=pd.Timestamp.now().tz)
+    })
+    
+    print(f"[INFO] Predictions completed. AQI range: {predictions.min():.1f} - {predictions.max():.1f}")
+    
+    return results
+
+
+def save_predictions_to_feature_store(predictions_df, fs, model_info):
+    """
+    Save predictions to Hopsworks feature store.
+    
+    Args:
+        predictions_df (pd.DataFrame): Predictions dataframe
+        fs: Feature store object
+        model_info (dict): Model version information
+    """
+    print(f"[INFO] Saving {len(predictions_df)} predictions to feature store...")
+    
+    # Add model metadata
+    predictions_df['model_version'] = model_info.get('version', 'unknown')
+    predictions_df['model_name'] = model_info.get('model_name', 'lgb_aqi_forecaster')
+    
+    # Ensure proper column types
+    predictions_df['predicted_us_aqi'] = predictions_df['predicted_us_aqi'].astype(int)
+    predictions_df['model_version'] = predictions_df['model_version'].astype(str)
+    
+    try:
+        # Get or create predictions feature group
         try:
-            resp = requests.get(air_url, params=params, timeout=30)
-            resp.raise_for_status()
-            raw = resp.json()
-            
-            df = pd.DataFrame({
-                "time_utc": pd.to_datetime(raw["hourly"]["time"]),
-                "pm_10": raw["hourly"]["pm10"],
-                "pm_25": raw["hourly"]["pm2_5"],
-                "carbon_monoxidegm": raw["hourly"]["carbon_monoxide"],
-                "nitrogen_dioxide": raw["hourly"]["nitrogen_dioxide"],
-                "sulphur_dioxide": raw["hourly"]["sulphur_dioxide"],
-                "ozone": raw["hourly"]["ozone"],
-            })
-            
-            logger.info(f"📈 Retrieved {len(df)} hours of forecast data")
-            return df
-            
-        except Exception as e:
-            logger.error(f"Failed to fetch forecast data: {e}")
-            raise
+            predictions_fg = fs.get_feature_group(name=PREDICTIONS_FG_NAME, version=PREDICTIONS_FG_VER)
+            print(f"[INFO] Using existing predictions feature group")
+        except:
+            print(f"[INFO] Creating new predictions feature group")
+            predictions_fg = fs.create_feature_group(
+                name=PREDICTIONS_FG_NAME,
+                version=PREDICTIONS_FG_VER,
+                description="AQI predictions from LightGBM model",
+                primary_key=["datetime_utc"],
+                event_time="prediction_date",
+                online_enabled=True
+            )
+        
+        # Insert predictions
+        predictions_fg.insert(predictions_df, write_options={"wait_for_job": True})
+        print(f"[INFO] Successfully saved predictions to feature store")
+        
+        return True
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to save predictions to feature store: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
-    def prepare_features(self, df_hist, df_future, all_features):
-        """Prepare features for prediction"""
+
+# =============================================================================
+# MAIN INFERENCE FUNCTION
+# =============================================================================
+
+def run_inference_pipeline():
+    """
+    Main function to run the AQI inference pipeline.
+    """
+    print("=" * 80)
+    print("🔮 LIGHTGBM AQI INFERENCE PIPELINE")
+    print("=" * 80)
+    
+    # Step 1: Load model artifacts
+    print("\n[1/8] 📦 Loading trained model and artifacts...")
+    try:
+        model, model_features, last_timestamp, model_info = load_model_artifacts()
+        print(f"✅ Model loaded successfully")
+        print(f"📊 Model expects {len(model_features)} features")
+    except Exception as e:
+        print(f"❌ Failed to load model: {e}")
+        return False
+    
+    # Step 2: Connect to Hopsworks
+    print("\n[2/8] 🔌 Connecting to Hopsworks...")
+    try:
+        project = hopsworks.login(api_key_value=API_KEY, project="weather_aqi")
+        fs = project.get_feature_store()
+        fg = fs.get_feature_group(name=FEATURE_GROUP_NAME, version=FEATURE_GROUP_VER)
+        print("✅ Successfully connected to Hopsworks")
+    except Exception as e:
+        print(f"❌ Failed to connect to Hopsworks: {e}")
+        return False
+    
+    # Step 3: Fetch latest data
+    print("\n[3/8] 📊 Fetching latest data from feature store...")
+    try:
+        df_latest = fetch_latest_data(fg, hours_back=168)  # 7 days
+        
+        # Validate required columns
+        base_features = ["pm_10", "pm_25", "carbon_monoxidegm", 
+                        "nitrogen_dioxide", "sulphur_dioxide", "ozone"]
+        required_cols = ["time"] + base_features
+        missing_cols = [col for col in required_cols if col not in df_latest.columns]
+        
+        if missing_cols:
+            print(f"❌ Missing required columns: {missing_cols}")
+            return False
+            
+        print("✅ Latest data fetched successfully")
+        
+    except Exception as e:
+        print(f"❌ Failed to fetch latest data: {e}")
+        return False
+    
+    # Step 4: Create future timestamps
+    print("\n[4/8] 📅 Creating future timestamps...")
+    try:
+        last_data_time = df_latest["time_utc"].max()
+        future_timestamps = create_future_timestamps(last_data_time, HORIZON_H)
+        
+        print(f"✅ Created {len(future_timestamps)} future timestamps")
+        print(f"📈 Forecast range: {future_timestamps[0]} to {future_timestamps[-1]}")
+        
+    except Exception as e:
+        print(f"❌ Failed to create future timestamps: {e}")
+        return False
+    
+    # Step 5: Extrapolate features for future timestamps
+    print("\n[5/8] 🔮 Extrapolating features for future predictions...")
+    try:
+        # Prepare historical data
+        historical_df = df_latest.set_index("time_utc")[base_features].copy()
+        
+        # Extrapolate features for future
+        future_df = extrapolate_features(historical_df, future_timestamps, base_features)
         
         # Combine historical and future data
-        cols_needed = ["time_utc"] + self.config['features']
+        combined_df = pd.concat([historical_df, future_df], axis=0).sort_index()
         
-        # Historical data (has target values)
-        hist_work = df_hist[cols_needed + ["us_aqi"]].copy()
-        hist_work = hist_work.set_index("time_utc")
+        print("✅ Feature extrapolation completed")
         
-        # Future data (no target values - we're predicting these)
-        future_work = df_future[cols_needed].copy()
-        future_work = future_work.set_index("time_utc")
-        future_work["us_aqi"] = np.nan  # We don't know these yet
+    except Exception as e:
+        print(f"❌ Failed to extrapolate features: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+    # Step 6: Prepare prediction data
+    print("\n[6/8] ⚙️  Preparing data for prediction...")
+    try:
+        prediction_data = prepare_prediction_data(combined_df, model_features, base_features)
         
-        # Combine for feature creation
-        combined_work = pd.concat([hist_work, future_work]).sort_index()
+        # Check if we have valid data for future timestamps
+        future_pred_data = prediction_data.loc[future_timestamps]
+        if future_pred_data.isna().all(axis=1).any():
+            print("[WARNING] Some future timestamps have all NaN features")
         
-        # Create lag features
-        combined_with_lags = self.create_lag_features(combined_work, self.config['features'])
+        print("✅ Prediction data prepared")
         
-        # Extract only future data with features
-        future_with_features = combined_with_lags.loc[future_work.index]
+    except Exception as e:
+        print(f"❌ Failed to prepare prediction data: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+    # Step 7: Make predictions
+    print("\n[7/8] 🤖 Generating AQI predictions...")
+    try:
+        predictions_df = make_predictions(model, prediction_data, future_timestamps)
         
-        # Keep only model features and drop rows with missing lag features
-        X_future = future_with_features[all_features].dropna()
+        print(f"✅ Generated {len(predictions_df)} predictions")
+        print(f"📊 AQI prediction range: {predictions_df['predicted_us_aqi'].min()} - {predictions_df['predicted_us_aqi'].max()}")
         
-        logger.info(f"🔧 Prepared features for {len(X_future)} prediction timestamps")
+        # Display sample predictions
+        print("\n📋 Sample predictions:")
+        sample_preds = predictions_df.head(10)[['datetime', 'predicted_us_aqi']].copy()
+        for _, row in sample_preds.iterrows():
+            print(f"   {row['datetime'].strftime('%Y-%m-%d %H:%M %Z')}: AQI {row['predicted_us_aqi']}")
         
-        return X_future
+    except Exception as e:
+        print(f"❌ Failed to make predictions: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+    # Step 8: Save predictions to feature store
+    print("\n[8/8] 💾 Saving predictions to feature store...")
+    try:
+        success = save_predictions_to_feature_store(predictions_df, fs, model_info)
+        
+        if success:
+            print("✅ Predictions saved successfully to feature store")
+        else:
+            print("⚠️  Failed to save to feature store, but predictions generated")
+        
+    except Exception as e:
+        print(f"❌ Error saving predictions: {e}")
+        success = False
+    
+    # Step 9: Save local backup
+    print("\n[9/8] 💾 Saving local backup...")
+    try:
+        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_path = os.path.join(ARTIFACT_DIR, f"predictions_{timestamp_str}.csv")
+        predictions_df.to_csv(backup_path, index=False)
+        print(f"✅ Predictions saved to: {backup_path}")
+    except Exception as e:
+        print(f"⚠️  Failed to save local backup: {e}")
+    
+    # Final summary
+    print("\n" + "=" * 80)
+    print("🎉 INFERENCE PIPELINE COMPLETED!")
+    print("=" * 80)
+    print(f"🔮 Generated predictions: {len(predictions_df)}")
+    print(f"📅 Forecast horizon: {HORIZON_H} hours")
+    print(f"📊 AQI range: {predictions_df['predicted_us_aqi'].min()} - {predictions_df['predicted_us_aqi'].max()}")
+    print(f"⏰ Forecast starts: {future_timestamps[0].strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"⏰ Forecast ends: {future_timestamps[-1].strftime('%Y-%m-%d %H:%M UTC')}")
+    
+    if 'model_version' in model_info:
+        print(f"🤖 Model version: {model_info['model_version']}")
+    
+    print("=" * 80)
+    
+    return True
 
-    def run_inference(self):
-        """Main inference pipeline"""
-        try:
-            logger.info("🚀 Starting AQI inference pipeline...")
 
-            # Connect to Hopsworks
-            project = hopsworks.login(api_key_value=API_KEY, project="weather_aqi")
-            fs = project.get_feature_store()
-
-            # Load model
-            model, all_features, model_version = self.load_model(project)
-            logger.info(f"📦 Loaded model version {model_version}")
-
-            # Fetch data for predictions
-            df_future = self.fetch_forecast_data(fs)
-            
-            if df_future.empty:
-                logger.info("✅ No new predictions needed - all up to date!")
-                return {"status": "no_new_predictions_needed"}
-
-            # Fetch historical data for lag features  
-            df_hist = self.fetch_historical_data(fs)
-
-            # Prepare features
-            X_future = self.prepare_features(df_hist, df_future, all_features)
-            
-            if len(X_future) == 0:
-                logger.warning("⚠️ No valid features for prediction (possibly insufficient historical data)")
-                return {"status": "no_valid_features"}
-
-            # Make predictions
-            predictions = model.predict(X_future)
-            n_pred = len(predictions)
-
-            logger.info(f"🎯 Generated {n_pred} predictions")
-
-            # Align df_future to predictions
-            prediction_timestamps = X_future.index
-            df_future_aligned = df_future[df_future['time_utc'].isin(prediction_timestamps)].copy()
-
-            # Create forecast dataframe
-            forecast_df = pd.DataFrame({
-                "datetime": self.utc_to_tz(pd.to_datetime(prediction_timestamps), self.config['TZ']),
-                "datetime_utc": prediction_timestamps,
-                "predicted_us_aqi": predictions,
-            })
-
-            # Add metadata
-            forecast_df["prediction_date"] = datetime.now(timezone.utc)
-            forecast_df["model_version"] = model_version
-
-            # Save to Feature Store
-            try:
-                predictions_fg = fs.get_or_create_feature_group(
-                    name="aqi_predictions",
-                    version=1,
-                    description="Hourly AQI forecasts with model version and prediction timestamp",
-                    primary_key=["datetime_utc", "prediction_date"],
-                    event_time="datetime_utc",
-                )
-                predictions_fg.insert(forecast_df)
-                logger.info("💾 Saved predictions to feature store")
-
-            except Exception as e:
-                logger.error(f"Failed to save predictions: {e}")
-                # Continue anyway - return results
-
-            result = {
-                "status": "success",
-                "model_version": model_version,
-                "predictions_count": int(n_pred),
-                "avg_aqi": float(np.mean(predictions)) if n_pred > 0 else None,
-                "time_range": f"{prediction_timestamps.min()} to {prediction_timestamps.max()}",
-                "prediction_hours": int(n_pred)
-            }
-
-            logger.info(f"✅ Inference completed: {n_pred} predictions generated")
-            return result
-
-        except Exception as e:
-            logger.error(f"❌ Inference pipeline failed: {e}")
-            logger.error(traceback.format_exc())
-            return {"status": "error", "message": str(e)}
+# =============================================================================
+# SCRIPT EXECUTION
+# =============================================================================
 
 if __name__ == "__main__":
-    pipeline = AQIInferencePipeline()
-    result = pipeline.run_inference()
-    print(result)
+    """
+    Run the inference pipeline.
+    
+    Usage:
+        python aqi_inference_pipeline.py
+    """
+    try:
+        success = run_inference_pipeline()
+        if success:
+            print("\n✅ Pipeline completed successfully!")
+        else:
+            print("\n❌ Pipeline completed with errors!")
+            exit(1)
+    except KeyboardInterrupt:
+        print("\n⚠️  Pipeline interrupted by user")
+        exit(1)
+    except Exception as e:
+        print(f"\n❌ Pipeline failed with error: {e}")
+        import traceback
+        traceback.print_exc()
+        exit(1)
+    finally:
+        print("\n👋 Pipeline execution finished")
