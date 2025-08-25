@@ -181,6 +181,39 @@ def get_or_create_historical_fg(fs):
             print(f"❌ Failed to create new feature group: {e2}")
             raise
 
+def update_accumulated_historical_data(fs):
+    """Fetch new AQI data, append to historical feature group, and return full dataset."""
+    historical_fg = get_or_create_historical_fg(fs)
+
+    # 1. Read existing historical data (if any)
+    existing_df = safe_read_feature_group(historical_fg)
+    if existing_df is not None and not existing_df.empty:
+        last_timestamp = existing_df["time"].max()
+        print(f"Last stored record: {last_timestamp}")
+        hours_since_last = int((datetime.now(timezone.utc) - last_timestamp).total_seconds() // 3600)
+        start_hours = min(hours_since_last + 1, HISTORICAL_DAYS * 24)
+    else:
+        print("No existing data found. Backfilling full history...")
+        existing_df = pd.DataFrame()
+        start_hours = HISTORICAL_DAYS * 24  # full backfill
+
+    # 2. Fetch new data from API
+    new_df = fetch_pollutant_data_api(start_hours_ago=start_hours)
+    if new_df.empty:
+        print("⚠️ No new data fetched from API")
+        return existing_df
+
+    # 3. Merge with existing dataset
+    combined_df = pd.concat([existing_df, new_df]).drop_duplicates(subset=["time"]).sort_values("time")
+
+    # 4. Write back to feature group
+    try:
+        historical_fg.insert(new_df, write_options={"wait_for_job": False})
+        print(f"Inserted {len(new_df)} new rows into historical feature group")
+    except Exception as e:
+        print(f"⚠️ Failed to insert into feature group: {e}")
+
+    return combined_df
 
 def create_lag_features(df, feat_cols, lags=None):
     """Create lag and rolling window features for time series data."""
