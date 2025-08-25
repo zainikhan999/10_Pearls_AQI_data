@@ -126,16 +126,8 @@ def get_or_create_historical_fg(fs):
         print(f"Could not get existing feature group: {e}")
         print(f"Creating new historical data feature group: {HISTORICAL_DATA_FG}")
         
-        # Create feature group for accumulated historical data
-        historical_fg = fs.create_feature_group(
-            name=HISTORICAL_DATA_FG,
-            version=HISTORICAL_DATA_VER,
-            description="Accumulated historical pollutant and AQI data for model training",
-            primary_key=["time"],
-            event_time="time",
-            online_enabled=False,
-            statistics_config=False
-        )
+        # This is where the bug is
+        historical_fg = fs.create_feature_group(...)
         return historical_fg
 
 
