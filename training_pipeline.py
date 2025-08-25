@@ -192,21 +192,15 @@ def update_accumulated_historical_data(fs):
         existing_data = safe_read_feature_group(historical_fg)
         
         if len(existing_data) > 0:
-            # Ensure time column is datetime
-            existing_data['time'] = pd.to_datetime(existing_data['time'])
+            # Ensure time column is datetime and UTC-aware
+            existing_data['time'] = ensure_utc(existing_data['time'])
             last_time = existing_data['time'].max()
             print(f"Last data timestamp in store: {last_time}")
             
-            # Calculate hours since last update - fix datetime comparison
+            # Calculate hours since last update
             now_utc = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
             
-            # Convert last_time to timezone-aware datetime if it isn't already
-            if last_time.tz is None:
-                last_time = last_time.tz_localize('UTC')
-            else:
-                last_time = last_time.tz_convert('UTC')
-            
-            # Now we can safely compare
+            # Now we can safely compare, because last_time is already UTC
             hours_to_fetch = max(1, int((now_utc - last_time).total_seconds() / 3600))
             print(f"Need to fetch {hours_to_fetch} hours of new data")
             
@@ -232,11 +226,12 @@ def update_accumulated_historical_data(fs):
         # Keep only recent data (last N days)
         cutoff_time = datetime.now(timezone.utc) - timedelta(days=HISTORICAL_DAYS)
         
-        # Ensure all_data['time'] is datetime
-        all_data['time'] = pd.to_datetime(all_data['time'])
+        # Corrected: Ensure all_data['time'] is timezone-aware before comparison
+        all_data['time'] = ensure_utc(all_data['time'])
         
         # Convert cutoff_time to pandas timestamp for comparison
         cutoff_timestamp = pd.Timestamp(cutoff_time)
+        
         recent_data = all_data[all_data['time'] >= cutoff_timestamp].copy()
         
         # Ensure proper data types
@@ -247,18 +242,16 @@ def update_accumulated_historical_data(fs):
         # Remove any remaining null values
         recent_data = recent_data.dropna(subset=BASE_FEATURES + ['us_aqi'])
         
+        # ... (rest of the function remains the same)
         print(f"Saving {len(recent_data)} records to historical feature group")
         print(f"Data range: {recent_data['time'].min()} to {recent_data['time'].max()}")
         
-        # Save to feature store - clear existing data first
         try:
-            # Delete all existing data and insert new
             historical_fg.delete_all()
             print("Cleared existing data from feature group")
         except Exception as e:
             print(f"Could not clear existing data: {e}")
         
-        # Insert new data
         historical_fg.insert(recent_data, write_options={"wait_for_job": True})
         print("Successfully saved data to feature store")
         
@@ -269,7 +262,6 @@ def update_accumulated_historical_data(fs):
         import traceback
         traceback.print_exc()
         raise
-
 
 def create_lag_features(df, feat_cols, lags=None):
     """Create lag and rolling window features for time series data."""
