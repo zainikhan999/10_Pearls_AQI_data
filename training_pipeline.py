@@ -450,14 +450,20 @@ def retrain_model():
             "feature_count": int(len(all_feature_cols))
         }
 
-        model_meta = mr.python.create_model(
-            name=model_name,
-            version=next_version,
-            metrics=metrics_dict,
-            model_schema=model_schema,
-            description=f"LightGBM AQI forecaster v{next_version} - Retrained with accumulated data."
-        )
+        # LightGBM model registration
+        model_meta = mr.sklearn.create_model(
+    name=model_name,
+    version=next_version,
+    metrics=metrics_dict,
+    model_schema=model_schema,
+    description=f"LightGBM AQI forecaster v{next_version} - Retrained with accumulated data."
+         )
+
+# Save artifacts (model.pkl, features.pkl, timestamp.pkl) to registry
         model_meta.save(ARTIFACT_DIR)
+
+        print(f"✅ Model '{model_name}' v{next_version} successfully saved to Hopsworks Model Registry!")
+
         print(f"Model v{next_version} successfully saved to registry!")
     except Exception as e:
         print(f"Failed to save to Model Registry: {e}")
