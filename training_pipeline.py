@@ -234,7 +234,13 @@ def load_existing_model_from_registry(project):
                 print(f"Last training timestamp: {last_timestamp}")
             model_metrics = latest_model.training_metrics
             if model_metrics:
-                print(f"Previous model metrics: R²={model_metrics.get('r2', 'N/A'):.4f}, RMSE={model_metrics.get('rmse', 'N/A'):.2f}")
+                # Fix the formatting error by checking if values are floats
+                r2_val = model_metrics.get('r2')
+                rmse_val = model_metrics.get('rmse')
+                r2_str = f"{r2_val:.4f}" if isinstance(r2_val, (int, float)) else "N/A"
+                rmse_str = f"{rmse_val:.2f}" if isinstance(rmse_val, (int, float)) else "N/A"
+                print(f"Previous model metrics: R²={r2_str}, RMSE={rmse_str}")
+
     except Exception as e:
         print(f"No existing models found or error accessing registry: {e}")
     return model, features, last_timestamp, model_metrics
@@ -406,16 +412,16 @@ def retrain_model():
     y_pred_val = model.predict(X_val)
     mae, rmse, r2 = calculate_metrics(y_val, y_pred_val)
     print(f"VALIDATION METRICS:")
-    print(f"   MAE:  {mae:.2f}")
-    print(f"   RMSE: {rmse:.2f}")
-    print(f"   R²:   {r2:.4f}")
+    print(f"   MAE:  {mae:.2f}")
+    print(f"   RMSE: {rmse:.2f}")
+    print(f"   R²:   {r2:.4f}")
 
     if prev_metrics:
         prev_r2 = prev_metrics.get('r2', 0)
         prev_rmse = prev_metrics.get('rmse', float('inf'))
         print(f"PERFORMANCE COMPARISON:")
-        print(f"   Previous R²:  {prev_r2:.4f} → Current R²:  {r2:.4f} ({'↑' if r2 > prev_r2 else '↓'} {abs(r2 - prev_r2):.4f})")
-        print(f"   Previous RMSE: {prev_rmse:.2f} → Current RMSE: {rmse:.2f} ({'↓' if rmse < prev_rmse else '↑'} {abs(rmse - prev_rmse):.2f})")
+        print(f"   Previous R²:   {prev_r2:.4f} → Current R²:   {r2:.4f} ({'↑' if r2 > prev_r2 else '↓'} {abs(r2 - prev_r2):.4f})")
+        print(f"   Previous RMSE: {prev_rmse:.2f} → Current RMSE: {rmse:.2f} ({'↓' if rmse < prev_rmse else '↑'} {abs(rmse - prev_rmse):.2f})")
 
     new_last_timestamp = work_df.index.max()
     save_artifacts(model, all_feature_cols, new_last_timestamp)
