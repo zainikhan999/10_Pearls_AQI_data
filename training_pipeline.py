@@ -104,13 +104,14 @@ def get_or_create_historical_fg(fs):
                 description="Accumulated historical pollutant and AQI data for model training",
                 primary_key=["time"],
                 event_time="time",
-                online_enabled=False,
-                statistics_config=False
+                online_enabled=False,     # ✅ offline only (timestamps allowed)
+                statistics_config={}      # ✅ better than False
             )
             return historical_fg
         except Exception as e:
             print(f"Failed to create new feature group: {e}")
             raise
+
 
 def safe_read_feature_group(feature_group):
     """Safely read from feature group with proper error handling."""
