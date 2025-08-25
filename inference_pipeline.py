@@ -238,13 +238,15 @@ try:
     print(f"\n[7] Storing predictions in Feature Store as '{FEATURE_GROUP_NAME}'...")
     try:
         fg = fs.get_or_create_feature_group(
-            name=FEATURE_GROUP_NAME,
-            version=FEATURE_GROUP_VERSION,
-            description="Predicted and API-provided AQI forecasts",
-            primary_key=["datetime"],
-            event_time="datetime",
-            online_enabled=True,
-        )
+    name=FEATURE_GROUP_NAME,
+    version=FEATURE_GROUP_VERSION,
+    description="Predicted and API-provided AQI forecasts",
+    primary_key=["datetime"],
+    event_time="datetime",
+    online_enabled=False,   # ✅ offline only (timestamps allowed as PK)
+    statistics_config={}    # ✅ consistent with training FG
+)
+
         fg.insert(merged)
         print("✅ Successfully wrote data to Feature Store.")
     except Exception as e:
