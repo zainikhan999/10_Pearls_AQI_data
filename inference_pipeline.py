@@ -1,3 +1,6 @@
+# First, ensure you have the required libraries installed:
+# !pip install hopsworks[python] lightgbm requests pandas numpy scikit-learn
+
 # === inference_pipeline_lgbm_no_plot.py ===
 import hopsworks
 import joblib
@@ -21,6 +24,8 @@ MAX_LAG_H = 120
 
 MODEL_NAME = "lgb_aqi_forecaster"
 MODEL_VER  = 1
+FEATURE_GROUP_NAME = "aqi_forecast_metrics_fg"
+FEATURE_GROUP_VERSION = 1
 
 # ------------------
 # Helpers
@@ -69,6 +74,7 @@ def utc_to_tz(ts_series: pd.Series, tz: str) -> pd.Series:
 print("[1] Logging into Hopsworks and loading LightGBM model...")
 try:
     project = hopsworks.login()
+    fs = project.get_feature_store()
     mr = project.get_model_registry()
     model_meta = mr.get_model(MODEL_NAME, version=None)
     model_dir = model_meta.download()
@@ -215,6 +221,7 @@ try:
     merged = pd.merge(pred_df, api_df, on="datetime", how="inner").sort_values("datetime")
 
     if not merged.empty:
+        # Calculate comparison metrics
         mae = mean_absolute_error(merged["us_aqi_forecast"], merged["predicted_us_aqi"])
         rmse = np.sqrt(mean_squared_error(merged["us_aqi_forecast"], merged["predicted_us_aqi"]))
         corr = np.corrcoef(merged["us_aqi_forecast"].values, merged["predicted_us_aqi"].values)[0,1]
@@ -226,11 +233,23 @@ try:
         print(f"  Data points: {len(merged)}")
     else:
         print("[warn] No overlapping timestamps between model predictions and API us_aqi.")
-
-    # Save results
-    merged_path = "lgbm_pred_vs_api.csv"
-    merged.to_csv(merged_path, index=False)
-    print(f"[info] Saved comparison CSV to: {merged_path}")
+    
+    # Store predictions in Hopsworks Feature Store
+    print(f"\n[7] Storing predictions in Feature Store as '{FEATURE_GROUP_NAME}'...")
+    try:
+        fg = fs.get_or_create_feature_group(
+            name=FEATURE_GROUP_NAME,
+            version=FEATURE_GROUP_VERSION,
+            description="Predicted and API-provided AQI forecasts",
+            primary_key=["datetime"],
+            event_time="datetime",
+            online_enabled=True,
+        )
+        fg.insert(merged)
+        print("✅ Successfully wrote data to Feature Store.")
+    except Exception as e:
+        print(f"[error] Failed to write to Feature Store: {e}")
 
 except requests.exceptions.RequestException as e:
     print(f"[error] Failed to fetch API us_aqi data: {e}")
+
