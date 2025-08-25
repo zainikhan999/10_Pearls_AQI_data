@@ -9,6 +9,7 @@ Key improvements:
 2. Fetches only new data since last update to avoid API limits
 3. Maintains consistent feature engineering across runs
 4. Better data management and error handling
+5. Fixed datetime comparison and feature group read issues
 """
 
 import os
@@ -46,16 +47,16 @@ HORIZON_H = 72  # Forecast horizon in hours
 MAX_LAG_H = 120  # Maximum lag for features
 HISTORICAL_DAYS = 90  # Keep 90 days of accumulated data
 
-# Directory structure
+# Directory structure (mainly for plots and temporary storage)
 ARTIFACT_DIR = "lgb_aqi_artifacts"
 PLOTS_DIR = os.path.join(ARTIFACT_DIR, "plots")
 os.makedirs(PLOTS_DIR, exist_ok=True)
 os.makedirs(ARTIFACT_DIR, exist_ok=True)
 
-# Model artifact paths
-MODEL_PATH = os.path.join(ARTIFACT_DIR, "lgb_model.pkl")
-FEATURES_PATH = os.path.join(ARTIFACT_DIR, "lgb_features.pkl")
-TIMESTAMP_PATH = os.path.join(ARTIFACT_DIR, "last_trained_timestamp.pkl")
+# Local backup paths (optional - Hopsworks is primary storage)
+MODEL_PATH = os.path.join(ARTIFACT_DIR, "lgb_model_backup.pkl")
+FEATURES_PATH = os.path.join(ARTIFACT_DIR, "lgb_features_backup.pkl")
+TIMESTAMP_PATH = os.path.join(ARTIFACT_DIR, "last_trained_timestamp_backup.pkl")
 
 # Base features for consistency
 BASE_FEATURES = ["pm_10", "pm_25", "carbon_monoxidegm", 
@@ -121,7 +122,8 @@ def get_or_create_historical_fg(fs):
         print(f"Found existing historical data feature group: {HISTORICAL_DATA_FG}")
         return historical_fg
         
-    except Exception:
+    except Exception as e:
+        print(f"Could not get existing feature group: {e}")
         print(f"Creating new historical data feature group: {HISTORICAL_DATA_FG}")
         
         # Create feature group for accumulated historical data
@@ -137,6 +139,48 @@ def get_or_create_historical_fg(fs):
         return historical_fg
 
 
+def safe_read_feature_group(feature_group):
+    """Safely read from feature group with proper error handling."""
+    try:
+        # Try different read methods
+        data = None
+        
+        # Method 1: Direct read
+        try:
+            data = feature_group.read()
+            if data is not None and len(data) > 0:
+                print(f"Successfully read {len(data)} records using direct read")
+                return data
+        except Exception as e:
+            print(f"Direct read failed: {e}")
+        
+        # Method 2: Read with query
+        try:
+            query = feature_group.select_all()
+            data = query.read()
+            if data is not None and len(data) > 0:
+                print(f"Successfully read {len(data)} records using query")
+                return data
+        except Exception as e:
+            print(f"Query read failed: {e}")
+        
+        # Method 3: Read with limits
+        try:
+            data = feature_group.read(limit=10000)
+            if data is not None and len(data) > 0:
+                print(f"Successfully read {len(data)} records using limited read")
+                return data
+        except Exception as e:
+            print(f"Limited read failed: {e}")
+        
+        print("All read methods failed or returned empty data")
+        return pd.DataFrame()
+        
+    except Exception as e:
+        print(f"Failed to read from feature group: {e}")
+        return pd.DataFrame()
+
+
 def update_accumulated_historical_data(fs):
     """Update the accumulated historical data with latest values."""
     print("Updating accumulated historical data...")
@@ -144,37 +188,42 @@ def update_accumulated_historical_data(fs):
     try:
         historical_fg = get_or_create_historical_fg(fs)
         
-        # Try to read existing data
-        try:
-            existing_data = historical_fg.read()
-            if len(existing_data) > 0:
-                existing_data['time'] = pd.to_datetime(existing_data['time'])
-                last_time = existing_data['time'].max()
-                print(f"Last data timestamp in store: {last_time}")
-                
-                # Calculate hours since last update
-                now_utc = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-                hours_to_fetch = max(1, int((now_utc - last_time).total_seconds() / 3600))
-                
-                # Fetch only new data
-                new_data = fetch_pollutant_data_api(hours_to_fetch, 0)
-                
-                if len(new_data) > 0:
-                    # Combine and deduplicate
-                    all_data = pd.concat([existing_data, new_data], ignore_index=True)
-                    all_data = all_data.drop_duplicates(subset=['time']).sort_values('time')
-                    print(f"Combined data: {len(all_data)} total records")
-                else:
-                    print("No new data to add")
-                    all_data = existing_data
+        # Try to read existing data with safe method
+        existing_data = safe_read_feature_group(historical_fg)
+        
+        if len(existing_data) > 0:
+            # Ensure time column is datetime
+            existing_data['time'] = pd.to_datetime(existing_data['time'])
+            last_time = existing_data['time'].max()
+            print(f"Last data timestamp in store: {last_time}")
+            
+            # Calculate hours since last update - fix datetime comparison
+            now_utc = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+            
+            # Convert last_time to timezone-aware datetime if it isn't already
+            if last_time.tz is None:
+                last_time = last_time.tz_localize('UTC')
             else:
-                print("No existing data found, fetching initial dataset")
-                # First time - get last 30 days
-                all_data = fetch_pollutant_data_api(24 * 30, 0)
-                
-        except Exception as e:
-            print(f"Could not read existing data: {e}")
-            print("Fetching initial dataset...")
+                last_time = last_time.tz_convert('UTC')
+            
+            # Now we can safely compare
+            hours_to_fetch = max(1, int((now_utc - last_time).total_seconds() / 3600))
+            print(f"Need to fetch {hours_to_fetch} hours of new data")
+            
+            # Fetch only new data
+            new_data = fetch_pollutant_data_api(hours_to_fetch, 0)
+            
+            if len(new_data) > 0:
+                # Combine and deduplicate
+                all_data = pd.concat([existing_data, new_data], ignore_index=True)
+                all_data = all_data.drop_duplicates(subset=['time']).sort_values('time')
+                print(f"Combined data: {len(all_data)} total records")
+            else:
+                print("No new data to add")
+                all_data = existing_data
+        else:
+            print("No existing data found, fetching initial dataset")
+            # First time - get last 30 days
             all_data = fetch_pollutant_data_api(24 * 30, 0)
         
         if len(all_data) == 0:
@@ -182,7 +231,13 @@ def update_accumulated_historical_data(fs):
         
         # Keep only recent data (last N days)
         cutoff_time = datetime.now(timezone.utc) - timedelta(days=HISTORICAL_DAYS)
-        recent_data = all_data[pd.to_datetime(all_data['time']) >= cutoff_time].copy()
+        
+        # Ensure all_data['time'] is datetime
+        all_data['time'] = pd.to_datetime(all_data['time'])
+        
+        # Convert cutoff_time to pandas timestamp for comparison
+        cutoff_timestamp = pd.Timestamp(cutoff_time)
+        recent_data = all_data[all_data['time'] >= cutoff_timestamp].copy()
         
         # Ensure proper data types
         for col in BASE_FEATURES + ['us_aqi']:
@@ -195,13 +250,24 @@ def update_accumulated_historical_data(fs):
         print(f"Saving {len(recent_data)} records to historical feature group")
         print(f"Data range: {recent_data['time'].min()} to {recent_data['time'].max()}")
         
-        # Save to feature store
+        # Save to feature store - clear existing data first
+        try:
+            # Delete all existing data and insert new
+            historical_fg.delete_all()
+            print("Cleared existing data from feature group")
+        except Exception as e:
+            print(f"Could not clear existing data: {e}")
+        
+        # Insert new data
         historical_fg.insert(recent_data, write_options={"wait_for_job": True})
+        print("Successfully saved data to feature store")
         
         return recent_data
         
     except Exception as e:
         print(f"Failed to update historical data: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 
@@ -228,16 +294,23 @@ def create_lag_features(df, feat_cols, lags=None):
 
 def ensure_utc(timestamp_series):
     """Ensure timestamp series is in UTC timezone."""
+    if isinstance(timestamp_series, (list, tuple)):
+        timestamp_series = pd.Series(timestamp_series)
+    
     ts = pd.to_datetime(timestamp_series)
-    try:
+    
+    # Handle single timestamp vs series
+    if hasattr(ts, 'dt'):
         if ts.dt.tz is None:
             return ts.dt.tz_localize("UTC")
         else:
             return ts.dt.tz_convert("UTC")
-    except AttributeError:
-        ts = pd.to_datetime(ts, errors="coerce")
-        ts = ts.dt.tz_localize("UTC")
-        return ts
+    else:
+        # Single timestamp
+        if ts.tz is None:
+            return ts.tz_localize("UTC")
+        else:
+            return ts.tz_convert("UTC")
 
 
 def calculate_metrics(y_true, y_pred):
@@ -248,26 +321,62 @@ def calculate_metrics(y_true, y_pred):
     return mae, rmse, r2
 
 
-def load_existing_artifacts():
-    """Load existing model artifacts if they exist."""
+def load_existing_model_from_registry(project):
+    """Load existing model and metadata from Hopsworks Model Registry."""
     model = None
     features = None
     last_timestamp = None
+    model_metrics = None
     
-    if os.path.exists(MODEL_PATH):
-        print(f"Loading existing model from: {MODEL_PATH}")
-        model = joblib.load(MODEL_PATH)
+    try:
+        # Get model registry
+        mr = project.get_model_registry()
+        model_name = "lgb_aqi_forecaster"
+        
+        # Get latest model version
+        try:
+            existing_models = mr.get_models(model_name)
+            if existing_models:
+                latest_model = max(existing_models, key=lambda x: x.version)
+                print(f"Found existing model: {model_name} v{latest_model.version}")
+                
+                # Download model artifacts
+                model_dir = latest_model.download()
+                print(f"Downloaded model to: {model_dir}")
+                
+                # Load the actual model
+                model_file = os.path.join(model_dir, "lgb_model.pkl")
+                if os.path.exists(model_file):
+                    model = joblib.load(model_file)
+                    print("Successfully loaded LightGBM model")
+                
+                # Load features
+                features_file = os.path.join(model_dir, "lgb_features.pkl")
+                if os.path.exists(features_file):
+                    features = joblib.load(features_file)
+                    print(f"Loaded {len(features)} features from registry")
+                
+                # Load last timestamp
+                timestamp_file = os.path.join(model_dir, "last_trained_timestamp.pkl")
+                if os.path.exists(timestamp_file):
+                    last_timestamp = joblib.load(timestamp_file)
+                    print(f"Last training timestamp: {last_timestamp}")
+                
+                # Get model metrics
+                model_metrics = latest_model.training_metrics
+                if model_metrics:
+                    print(f"Previous model metrics: R²={model_metrics.get('r2', 'N/A'):.4f}, RMSE={model_metrics.get('rmse', 'N/A'):.2f}")
+                
+            else:
+                print(f"No existing models found for {model_name}")
+                
+        except Exception as e:
+            print(f"No existing models found or error accessing registry: {e}")
+            
+    except Exception as e:
+        print(f"Failed to access model registry: {e}")
     
-    if os.path.exists(FEATURES_PATH):
-        print(f"Loading feature list from: {FEATURES_PATH}")
-        features = joblib.load(FEATURES_PATH)
-    
-    if os.path.exists(TIMESTAMP_PATH):
-        print(f"Loading last training timestamp from: {TIMESTAMP_PATH}")
-        last_timestamp = joblib.load(TIMESTAMP_PATH)
-        print(f"Last training timestamp: {last_timestamp}")
-    
-    return model, features, last_timestamp
+    return model, features, last_timestamp, model_metrics
 
 
 def save_artifacts(model, features, last_timestamp):
@@ -335,9 +444,9 @@ def retrain_model():
         print(f"Failed to connect to Hopsworks: {e}")
         return
     
-    # Step 2: Load existing artifacts
-    print("\n[2/8] Loading existing model artifacts...")
-    existing_model, existing_features, last_trained_timestamp = load_existing_artifacts()
+    # Step 2: Load existing model from Hopsworks Model Registry
+    print("\n[2/8] Loading existing model from Hopsworks Model Registry...")
+    existing_model, existing_features, last_trained_timestamp, prev_metrics = load_existing_model_from_registry(project)
     
     # Step 3: Update accumulated historical data
     print("\n[3/8] Updating accumulated historical data...")
@@ -353,14 +462,19 @@ def retrain_model():
     print("\n[4/8] Checking if retraining is needed...")
     
     if last_trained_timestamp is not None:
-        last_trained_utc = ensure_utc(pd.Series([last_trained_timestamp]))[0]
-        new_data = training_data[pd.to_datetime(training_data['time']) > last_trained_utc]
-        
-        if len(new_data) < 24:  # Less than 1 day of new data
-            print(f"Only {len(new_data)} new records since last training. Skipping retraining.")
-            return
-        
-        print(f"Found {len(new_data)} new records since {last_trained_timestamp}")
+        try:
+            last_trained_utc = ensure_utc(pd.Series([last_trained_timestamp]))[0]
+            training_data_time = pd.to_datetime(training_data['time'])
+            new_data = training_data[training_data_time > last_trained_utc]
+            
+            if len(new_data) < 24:  # Less than 1 day of new data
+                print(f"Only {len(new_data)} new records since last training. Skipping retraining.")
+                return
+            
+            print(f"Found {len(new_data)} new records since {last_trained_timestamp}")
+        except Exception as e:
+            print(f"Error checking new data: {e}")
+            print("Proceeding with full retraining")
     else:
         print("No previous training found. Training from scratch.")
     
@@ -423,6 +537,12 @@ def retrain_model():
     # Step 7: Model training
     print("\n[7/8] Training LightGBM model...")
     
+    # Train or continue training the model
+    model = train_or_continue_model(existing_model, X_train, y_train, X_val, y_val)
+    
+def train_or_continue_model(existing_model, X_train, y_train, X_val, y_val):
+    """Train a new model or continue training an existing one."""
+    
     # Prepare LightGBM datasets
     lgb_train = lgb.Dataset(X_train, y_train)
     lgb_val = lgb.Dataset(X_val, y_val, reference=lgb_train)
@@ -442,18 +562,35 @@ def retrain_model():
         'force_col_wise': True
     }
     
-    # Train the model
-    print("Starting model training...")
-    model = lgb.train(
-        params,
-        lgb_train,
-        num_boost_round=800,
-        valid_sets=[lgb_val],
-        callbacks=[
-            lgb.early_stopping(stopping_rounds=50),
-            lgb.log_evaluation(100)
-        ]
-    )
+    if existing_model is not None:
+        print("Continuing training from existing model...")
+        # Continue training from existing model
+        model = lgb.train(
+            params,
+            lgb_train,
+            num_boost_round=200,  # Fewer rounds for incremental training
+            valid_sets=[lgb_val],
+            init_model=existing_model,  # Use existing model as starting point
+            callbacks=[
+                lgb.early_stopping(stopping_rounds=30),
+                lgb.log_evaluation(50)
+            ]
+        )
+    else:
+        print("Training new model from scratch...")
+        # Train new model
+        model = lgb.train(
+            params,
+            lgb_train,
+            num_boost_round=800,
+            valid_sets=[lgb_val],
+            callbacks=[
+                lgb.early_stopping(stopping_rounds=50),
+                lgb.log_evaluation(100)
+            ]
+        )
+    
+    return model
     
     print("Model training completed!")
     
@@ -473,7 +610,16 @@ def retrain_model():
     # Create evaluation plots
     create_evaluation_plots(y_val, y_pred_val, r2)
     
-    # Save artifacts locally
+    # Compare with previous model if available
+    if prev_metrics:
+        prev_r2 = prev_metrics.get('r2', 0)
+        prev_rmse = prev_metrics.get('rmse', float('inf'))
+        
+        print(f"PERFORMANCE COMPARISON:")
+        print(f"   Previous R²:  {prev_r2:.4f} → Current R²:  {r2:.4f} ({'↑' if r2 > prev_r2 else '↓'} {abs(r2 - prev_r2):.4f})")
+        print(f"   Previous RMSE: {prev_rmse:.2f} → Current RMSE: {rmse:.2f} ({'↓' if rmse < prev_rmse else '↑'} {abs(rmse - prev_rmse):.2f})")
+    
+    # Save artifacts locally for backup (optional)
     new_last_timestamp = work_df.index.max()
     save_artifacts(model, all_feature_cols, new_last_timestamp)
     
