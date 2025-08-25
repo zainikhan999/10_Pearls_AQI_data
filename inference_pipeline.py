@@ -76,7 +76,7 @@ try:
     project = hopsworks.login()
     fs = project.get_feature_store()
     mr = project.get_model_registry()
-    model_meta = mr.get_model(MODEL_NAME, version=None)
+    model_meta = mr.get_model(MODEL_NAME, version=2)
     model_dir = model_meta.download()
 
     model = joblib.load(os.path.join(model_dir, "lgb_model.pkl"))
