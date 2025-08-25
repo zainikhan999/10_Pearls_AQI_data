@@ -139,51 +139,47 @@ def ensure_utc(timestamp_series):
     else:
         return ts.dt.tz_convert("UTC")
 
-def update_accumulated_historical_data(fs):
-    """Update the accumulated historical data with latest values."""
-    print("Updating accumulated historical data...")
-    historical_fg = get_or_create_historical_fg(fs)
-    if not historical_fg:
-        raise RuntimeError("Failed to get or create historical feature group.")
+def get_or_create_historical_fg(fs):
+    """Get existing historical data feature group or create new one."""
+    try:
+        historical_fg = fs.get_feature_group(
+            name=HISTORICAL_DATA_FG,
+            version=HISTORICAL_DATA_VER
+        )
+        print(f"Found existing historical data feature group: {HISTORICAL_DATA_FG}")
+        return historical_fg
+    except Exception as e:
+        print(f"Could not get existing feature group: {e}")
+        print(f"Creating new historical data feature group: {HISTORICAL_DATA_FG}")
 
-    existing_data = safe_read_feature_group(historical_fg)
-    if not existing_data.empty:
-        existing_data['time'] = ensure_utc(existing_data['time'])
-        last_time = existing_data['time'].max()
-        print(f"Last data timestamp in store: {last_time}")
-        now_utc = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-        hours_to_fetch = max(1, int((now_utc - last_time).total_seconds() / 3600) + 1)
-        print(f"Need to fetch {hours_to_fetch} hours of new data")
-        new_data = fetch_pollutant_data_api(hours_to_fetch, 0)
-        if not new_data.empty:
-            all_data = pd.concat([existing_data, new_data], ignore_index=True)
-            all_data = all_data.drop_duplicates(subset=['time']).sort_values('time')
-            print(f"Combined data: {len(all_data)} total records")
-        else:
-            print("No new data to add")
-            all_data = existing_data
-    else:
-        print("No existing data found, fetching initial dataset")
-        all_data = fetch_pollutant_data_api(24 * HISTORICAL_DAYS, 0)
+        # Define schema for feature group
+        col_defs = [
+            ("time", "timestamp"),
+            ("pm_10", "float"),
+            ("pm_25", "float"),
+            ("carbon_monoxidegm", "float"),
+            ("nitrogen_dioxide", "float"),
+            ("sulphur_dioxide", "float"),
+            ("ozone", "float"),
+            ("us_aqi", "float"),
+        ]
 
-    if all_data.empty:
-        raise ValueError("No data available for training")
-    
-    all_data['time'] = ensure_utc(all_data['time'])
-    cutoff_time = datetime.now(timezone.utc) - timedelta(days=HISTORICAL_DAYS)
-    recent_data = all_data[all_data['time'] >= cutoff_time].copy()
-    
-    for col in BASE_FEATURES + ['us_aqi']:
-        if col in recent_data.columns:
-            recent_data[col] = pd.to_numeric(recent_data[col], errors='coerce')
-    recent_data = recent_data.dropna(subset=BASE_FEATURES + ['us_aqi'])
-    
-    print(f"Saving {len(recent_data)} records to historical feature group")
-    print(f"Data range: {recent_data['time'].min()} to {recent_data['time'].max()}")
-    
-    historical_fg.insert(recent_data, write_options={"wait_for_job": True})
-    print("Successfully saved data to feature store")
-    return recent_data
+        try:
+            historical_fg = fs.create_feature_group(
+                name=HISTORICAL_DATA_FG,
+                version=HISTORICAL_DATA_VER,
+                description="Accumulated historical pollutant and AQI data for model training",
+                primary_key=["time"],
+                event_time="time",
+                online_enabled=False,
+                schema=col_defs,   # 👈 explicit schema fixes creation
+                statistics_config={}
+            )
+            print("✅ Created new historical feature group successfully")
+            return historical_fg
+        except Exception as e2:
+            print(f"❌ Failed to create new feature group: {e2}")
+            raise
 
 
 def create_lag_features(df, feat_cols, lags=None):
