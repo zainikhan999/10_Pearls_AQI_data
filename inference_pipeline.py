@@ -230,6 +230,9 @@ def main():
             "us_aqi_forecast": api_data["hourly"]["us_aqi"]
         })
         
+        # Ensure both datetime columns have the same timezone for merging
+        api_df["datetime"] = api_df["datetime"].dt.tz_convert(pred_df["datetime"].iloc[0].tz)
+        
         # Merge predictions with API forecasts
         final_df = pd.merge(pred_df, api_df, on="datetime", how="left")
         
@@ -263,9 +266,14 @@ def main():
             statistics_config={}
         )
         
-        # Convert timezone for storage (if needed)
+        # Convert timezone for storage - ensure timezone-aware conversion
         store_df = final_df.copy()
-        store_df["datetime"] = store_df["datetime"].dt.tz_convert("UTC")
+        if store_df["datetime"].dt.tz is None:
+            # If datetime is timezone-naive, localize it first
+            store_df["datetime"] = store_df["datetime"].dt.tz_localize(TZ).dt.tz_convert("UTC")
+        else:
+            # If already timezone-aware, just convert
+            store_df["datetime"] = store_df["datetime"].dt.tz_convert("UTC")
         
         fg.insert(store_df, write_options={"wait_for_job": False})
         print("✅ Successfully stored predictions")
