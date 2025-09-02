@@ -268,6 +268,12 @@ def main():
         
         # Convert timezone for storage - ensure timezone-aware conversion
         store_df = final_df.copy()
+        
+        # Ensure correct data types for Feature Store
+        store_df["predicted_us_aqi"] = store_df["predicted_us_aqi"].astype(float)
+        if "us_aqi_forecast" in store_df.columns:
+            store_df["us_aqi_forecast"] = store_df["us_aqi_forecast"].astype(float)
+        
         if store_df["datetime"].dt.tz is None:
             # If datetime is timezone-naive, localize it first
             store_df["datetime"] = store_df["datetime"].dt.tz_localize(TZ).dt.tz_convert("UTC")
