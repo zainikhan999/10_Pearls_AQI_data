@@ -84,8 +84,9 @@ def fetch_historical_and_forecast_data():
             print("⚠️ Warning: 'hourly' key missing in API response!")
             return pd.DataFrame(), pd.DataFrame()
             
+        # Fix: Remove .dt accessor since pd.to_datetime() already returns DatetimeIndex
         df = pd.DataFrame({
-            "time": pd.to_datetime(data["hourly"]["time"]).dt.tz_localize(TZ),
+            "time": pd.to_datetime(data["hourly"]["time"]).tz_localize(TZ),
             "pm_10": data["hourly"]["pm10"],
             "pm_25": data["hourly"]["pm2_5"],
             "carbon_monoxidegm": data["hourly"]["carbon_monoxide"],
@@ -223,8 +224,9 @@ def main():
         api_resp.raise_for_status()
         api_data = api_resp.json()
         
+        # Fix: Remove .dt accessor here too
         api_df = pd.DataFrame({
-            "datetime": pd.to_datetime(api_data["hourly"]["time"]).dt.tz_localize(TZ),
+            "datetime": pd.to_datetime(api_data["hourly"]["time"]).tz_localize(TZ),
             "us_aqi_forecast": api_data["hourly"]["us_aqi"]
         })
         
